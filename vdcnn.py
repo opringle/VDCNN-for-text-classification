@@ -43,19 +43,18 @@ parser.add_argument('--num-epochs', type=int, default=100,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=512,
                     help='the number of training records in each minibatch')
-parser.add_argument('--sequence-length', type=int, default=128,
+parser.add_argument('--sequence-length', type=int, default=1024,
                     help='the number of characters in each training example')
 parser.add_argument('--optimizer', type=str, default='Adam',
                     help='optimization algorithm to update model parameters with')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='learning rate for chosen optimizer')
+parser.add_argument('--dropout', type=float, default=0.2,
+                    help='dropout regularization probability')
 parser.add_argument('--blocks', type=str, default='2,2,2,2',
                     help='Number of conv blocks in each component of the network')
 parser.add_argument('--channels', type=str, default='64,128,256,512',
                     help='Number of channels in each conv block')
-
-# parser.add_argument('--dropout', type=float, default=0.2,
-#                     help='the user/item latent feature dimension')
 
 
 class UtterancePreprocessor:
@@ -66,6 +65,8 @@ class UtterancePreprocessor:
         self.length = length
         self.pad_value = pad_value
         self.unknown_char_index = unknown_char_index
+        self.padded_data = 0
+        self.sliced_data = 0
 
     @staticmethod
     def build_vocab(data, depth):
@@ -87,9 +88,11 @@ class UtterancePreprocessor:
         """
         diff = self.length - len(utterance)
         if diff > 0:
+            self.padded_data += 1
             utterance.extend([self.pad_value] * diff)
             return utterance
         else:
+            self.sliced_data += 1
             return utterance[:self.length]
 
     def fit(self, utterances, labels):
@@ -134,6 +137,9 @@ def build_iters(train_df, test_df):
     test_df['X'] = test_df['description'].apply(preprocessor.transform_utterance)
     train_df['Y'] = train_df['class'].apply(preprocessor.transform_label)
     test_df['Y'] = test_df['class'].apply(preprocessor.transform_label)
+    print("{} utterances were padded & {} utterances were sliced to length = {}".format(preprocessor.padded_data,
+                                                                                        preprocessor.sliced_data,
+                                                                                        preprocessor.length))
 
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
@@ -198,9 +204,15 @@ def build_symbol(iterator, preprocessor, blocks, channels):
     act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
     print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
 
+    if args.dropout > 0:
+        act1 = mx.sym.Dropout(act1, p=args.dropout)
+
     fc2 = mx.sym.FullyConnected(act1, num_hidden=2048, flatten=True, name='fc2')
     act2 = mx.sym.Activation(fc2, act_type='relu', name='fc2_act')
     print("fc2 output: ", fc2.infer_shape(data=X_shape)[1][0])
+
+    if args.dropout > 0:
+        act2 = mx.sym.Dropout(act2, p=args.dropout)
 
     output = mx.sym.FullyConnected(act2, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
     sm = mx.sym.SoftmaxOutput(output, softmax_label)

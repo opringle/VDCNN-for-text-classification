@@ -56,6 +56,8 @@ parser.add_argument('--channels', type=str, default='64,128,256,512',
                     help='Number of channels in each conv block')
 parser.add_argument('--final-pool', action='store_true',
                     help='Number of channels in each conv block')
+parser.add_argument('--encode', action='store_true',
+                    help='Whether to encode or embed chars')
 
 
 class UtterancePreprocessor:
@@ -181,10 +183,17 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("data_input: ", data.infer_shape(data=X_shape)[1][0])
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
-    # Embed data to 16 channels
-    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index)+2, output_dim=16)
-    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
-    print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
+    if args.encode:
+        # One hot encode each char
+        embedded_data = mx.sym.one_hot(data, depth=len(char_to_index)+2)
+        embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0,2,1)), shape=(0, 0, 1, -1))
+        print("encoded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
+
+    else:
+        # Embed data to 16 channels
+        embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index)+2, output_dim=16)
+        embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
+        print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Temporal Convolutional Layer
     temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))

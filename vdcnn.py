@@ -62,12 +62,13 @@ class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, pad_value, unknown_char_index):
+    def __init__(self, length, pad_value, unknown_char_index, char_to_index=None):
         self.length = length
         self.pad_value = pad_value
         self.unknown_char_index = unknown_char_index
         self.padded_data = 0
         self.sliced_data = 0
+        self.char_to_index = char_to_index
 
     @staticmethod
     def build_vocab(data, depth):
@@ -102,7 +103,7 @@ class UtterancePreprocessor:
         :param labels: list of string
         """
         chars = [list(utterance.lower()) for utterance in utterances]
-        self.char_to_index = self.build_vocab(chars, depth=2)
+        self.char_to_index = self.build_vocab(chars, depth=2) if not self.char_to_index else self.char_to_index
         self.label_to_index = self.build_vocab(labels, depth=1)
 
     def transform_utterance(self, utterance):
@@ -123,7 +124,7 @@ class UtterancePreprocessor:
         return self.label_to_index.get(label)
 
 
-def build_iters(train_df, test_df, feature_col, label_col):
+def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     """
     :param train_df: pandas dataframe of training data
     :param test_df: pandas dataframe of test data
@@ -132,7 +133,8 @@ def build_iters(train_df, test_df, feature_col, label_col):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, pad_value=-1, unknown_char_index=-2)
+    preprocessor = UtterancePreprocessor(length=args.sequence_length, pad_value=len(alphabet)-1,
+                                         unknown_char_index=len(alphabet), char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
 
     # Transform data
@@ -262,8 +264,13 @@ if __name__ == '__main__':
     train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
     test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
 
+    # Define vocab
+    alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} '
+    char_to_index = {k: v for v, k in enumerate(list(alph))}
+
     # Build data iterators
-    preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent')
+    preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent',
+                                                     alphabet=char_to_index)
 
     # Build network graph
     symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)

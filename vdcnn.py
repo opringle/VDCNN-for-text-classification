@@ -199,8 +199,11 @@ def build_symbol(iterator, preprocessor, blocks, channels):
             pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
+    final_pool = mx.sym.Pooling(block, kernel=(1, 16), stride=(1, 16), pad=(0, 1), pool_type='max')
+    print("final pool output: ", final_pool.infer_shape(data=X_shape)[1][0])
+
     # Fully connected layers
-    fc1 = mx.sym.FullyConnected(block, num_hidden=2048, flatten=True, name='fc1')
+    fc1 = mx.sym.FullyConnected(final_pool, num_hidden=2048, flatten=True, name='fc1')
     act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
     print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
 
@@ -238,6 +241,7 @@ def train(symbol, train_iter, val_iter):
                initializer=mx.initializer.Normal(sigma=0.01),
                num_epoch=args.num_epochs)
     return module
+
 
 if __name__ == '__main__':
     # Parse args

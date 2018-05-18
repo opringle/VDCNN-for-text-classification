@@ -182,7 +182,7 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
     # Embed data to 16 channels
-    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
+    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index)+2, output_dim=16)
     embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 

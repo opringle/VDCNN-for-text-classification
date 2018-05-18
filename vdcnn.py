@@ -48,8 +48,10 @@ parser.add_argument('--optimizer', type=str, default='Adam',
                     help='optimization algorithm to update model parameters with')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='learning rate for chosen optimizer')
-parser.add_argument('--dropout', type=float, default=0.2,
-                    help='dropout regularization probability')
+parser.add_argument('--l2', type=float, default=0.0,
+                    help='l2 regularization coefficient')
+parser.add_argument('--hidden-dropout', type=float, default=0.0,
+                    help='dropout regularization probability for hidden units')
 parser.add_argument('--blocks', type=str, default='2,2,2,2',
                     help='Number of conv blocks in each component of the network')
 parser.add_argument('--channels', type=str, default='64,128,256,512',
@@ -58,6 +60,52 @@ parser.add_argument('--final-pool', action='store_true',
                     help='Number of channels in each conv block')
 parser.add_argument('--encode', action='store_true',
                     help='Whether to encode or embed chars')
+
+
+class k_max_pool(mx.operator.CustomOp):
+  def __init__(self, k):
+    super(k_max_pool, self).__init__()
+    self.k = int(k)
+  def forward(self, is_train, req, in_data, out_data, aux):
+    x = in_data[0].asnumpy()
+    assert(4 == len(x.shape))
+    ind = np.argsort(x, axis = 2)
+    sorted_ind = np.sort(ind[:,:,-(self.k):,:], axis = 2)
+    dim0, dim1, dim2, dim3 = sorted_ind.shape
+    self.indices_dim0 = np.arange(dim0).repeat(dim1 * dim2 * dim3)
+    self.indices_dim1 = np.transpose(np.arange(dim1).repeat(dim2 * dim3).reshape((dim1*dim2*dim3, 1)).repeat(dim0, axis=1)).flatten()
+    self.indices_dim2 = sorted_ind.flatten()
+    self.indices_dim3 = np.transpose(np.arange(dim3).repeat(dim2).reshape((dim3, dim2)).repeat(dim0 * dim1, axis = 1)).flatten()
+    y = x[self.indices_dim0, self.indices_dim1, self.indices_dim2, self.indices_dim3].reshape(sorted_ind.shape)
+    self.assign(out_data[0], req[0], mx.nd.array(y))
+
+  def backward(self, req, out_grad, in_data, out_data, in_grad, aux):
+    x = out_grad[0].asnumpy()
+    y = in_data[0].asnumpy()
+    assert(4 == len(x.shape))
+    assert(4 == len(y.shape))
+    y[:,:,:,:] = 0
+    y[self.indices_dim0, self.indices_dim1, self.indices_dim2, self.indices_dim3] \
+      = x.reshape([x.shape[0] * x.shape[1] * x.shape[2] * x.shape[3],])
+    self.assign(in_grad[0], req[0], mx.nd.array(y))
+
+@mx.operator.register("k_max_pool")
+class k_max_poolProp(mx.operator.CustomOpProp):
+  def __init__(self, k):
+    self.k = int(k)
+    super(k_max_poolProp, self).__init__(True)
+  def list_argument(self):
+    return ['data']
+  def list_outputs(self):
+    return ['output']
+  def infer_shape(self, in_shape):
+    data_shape = in_shape[0]
+    assert(len(data_shape) == 4)
+    out_shape = (data_shape[0], data_shape[1], self.k, data_shape[3])
+    return [data_shape], [out_shape]
+
+  def create_operator(self, ctx, shapes, dtypes):
+    return k_max_pool(self.k)
 
 
 class UtterancePreprocessor:
@@ -135,9 +183,15 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, pad_value=len(alphabet),
-                                         unknown_char_index=len(alphabet)+1, char_to_index=alphabet)
+    preprocessor = UtterancePreprocessor(length=args.sequence_length, char_to_index=alphabet,
+                                         unknown_char_index=-1, pad_value=-2)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
+
+    # When we encounter an unknown char in deployment we will look up the last vector in the embedding matrix
+    preprocessor.unknown_char_index, preprocessor.pad_value = len(preprocessor.char_to_index), \
+                                                              len(preprocessor.char_to_index)
+
+    print("index of unknown characters = {}\nindex of padded characters = {}".format(preprocessor.unknown_char_index, preprocessor.pad_value))
 
     # Transform data
     train_df['X'] = train_df[feature_col].apply(preprocessor.transform_utterance)
@@ -184,19 +238,28 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
     if args.encode:
-        # One hot encode each char
-        embedded_data = mx.sym.one_hot(data, depth=len(char_to_index)+2)
-        embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0,2,1)), shape=(0, 0, 1, -1))
+        # One hot encode each char, exclude padded chars
+        embedded_data = mx.sym.one_hot(data, depth=len(preprocessor.char_to_index))
+
+        # Reshape to (batchsize, 1, onehot, seq len)
+        embedded_data = mx.sym.BlockGrad(mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0,2,1)), shape=(0, 1, len(preprocessor.char_to_index), -1)))
         print("encoded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     else:
+        # # Initialize word embedding matrix
+        # char_embeddings = mx.sym.Variable('char_embeds')
+        # char_embeddings.bind(mx.cpu(), {'char_embeds': mx.ndarray.random.normal(scale=0.01, shape=(len(preprocessor.char_to_index), 16))})
+        # zero_embedding = mx.sym.BlockGrad(mx.sym.zeros(shape=(1, 16))) # embedding for padded chars is always zeros
+        # embeddings = mx.sym.concat(*[char_embeddings, zero_embedding], dim=0)
+        # print("embedding matrix shape: ", embeddings.infer_shape()[1][0])
+
         # Embed data to 16 channels
-        embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index)+2, output_dim=16)
+        embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
         embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
         print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Temporal Convolutional Layer
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
+    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(len(preprocessor.char_to_index), 3), num_filter=64, pad=(0, 1))
     print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between
@@ -214,25 +277,26 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
             pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
-    if final_pool:
-        pool_kernel_size = args.sequence_length // 64
-        block = mx.sym.Pooling(block, kernel=(1, pool_kernel_size), stride=(1, pool_kernel_size), pad=(0, 0), pool_type='max')
-        print("final pool output: ", block.infer_shape(data=X_shape)[1][0])
+    if args.final_pool:
+        # pool_kernel_size = args.sequence_length // 64
+        #block = mx.sym.Pooling(block, kernel=(1, pool_kernel_size), stride=(1, pool_kernel_size), pad=(0, 0), pool_type='max')
+        block = mx.sym.transpose(mx.symbol.Custom(data=mx.sym.transpose(block, axes=(0, 1, 3, 2)), name='8_max_pool', op_type='k_max_pool', k=8), axes=(0, 1, 3, 2))
+        print("k max pool output: ", block.infer_shape(data=X_shape)[1][0])
 
     # Fully connected layers
     fc1 = mx.sym.FullyConnected(block, num_hidden=2048, flatten=True, name='fc1')
     act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
     print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
 
-    if args.dropout != 0:
-        act1 = mx.sym.Dropout(act1, p=args.dropout)
+    if args.hidden_dropout != 0:
+        act1 = mx.sym.Dropout(act1, p=args.hidden_dropout)
 
     fc2 = mx.sym.FullyConnected(act1, num_hidden=2048, flatten=True, name='fc2')
     act2 = mx.sym.Activation(fc2, act_type='relu', name='fc2_act')
     print("fc2 output: ", fc2.infer_shape(data=X_shape)[1][0])
 
-    if args.dropout != 0:
-        act2 = mx.sym.Dropout(act2, p=args.dropout)
+    if args.hidden_dropout != 0:
+        act2 = mx.sym.Dropout(act2, p=args.hidden_dropout)
 
     output = mx.sym.FullyConnected(act2, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
     sm = mx.sym.SoftmaxOutput(output, softmax_label)
@@ -254,8 +318,8 @@ def train(symbol, train_iter, val_iter):
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr},
-               initializer=mx.initializer.Normal(sigma=0.01),
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},
+               initializer=mx.initializer.Normal(0.01),
                num_epoch=args.num_epochs)
     return module
 
@@ -279,7 +343,7 @@ if __name__ == '__main__':
 
     # Build data iterators
     preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent',
-                                                     alphabet=char_to_index)
+                                                     alphabet=None)
 
     # Build network graph
     symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)

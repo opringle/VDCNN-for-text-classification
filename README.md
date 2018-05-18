@@ -2,16 +2,27 @@
 implementing this paper in MXNet: https://arxiv.org/pdf/1606.01781.pdf
 
 - Do not use skip connections
-- Do not use k-max pooling
-- Added dropout between final 2 layers
+
+## ToDo
+
+1. Convert k-max-pool to use ndarray
+2. train effectively on AG news dataset (overnight will take 14 hours)
+3. Understand why learning takes so many more epochs in my implementation
 
 ## Insights
+
+### How to treat padded data and unknown data
+
+- When an unknown character is encountered, we should return a vector of zeros to ensure the prediction is not effected.
+- Currently unknown chars and padded chars are treated as whitespace
+
+
+
 
 ### Training compared to word-CNN model
 
 - Validation score is much more unstable
 - Model can quickly reach 60% training accuracy, but then learns slowly after that. Makes sense we have to learn  hierarchical features.
-
 
 ### Time to train
 

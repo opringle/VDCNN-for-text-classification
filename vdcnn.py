@@ -160,10 +160,10 @@ def build_symbol(iterator, preprocessor, blocks, channels):
     """
 
     def conv_block(data, num_filter, name):
-        convi1 = mx.sym.Convolution(data, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv1'+str(name))
+        convi1 = mx.sym.Convolution(data, kernel=(3), num_filter=num_filter, pad=(1), name='conv1'+str(name))
         normi1 = mx.sym.BatchNorm(convi1, name='norm1'+str(name))
         acti1 = mx.sym.Activation(normi1, act_type='relu', name='rel1'+str(name))
-        convi2 = mx.sym.Convolution(acti1, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv2'+str(name))
+        convi2 = mx.sym.Convolution(acti1, kernel=(3), num_filter=num_filter, pad=(1), name='conv2'+str(name))
         normi2 = mx.sym.BatchNorm(convi2, name='norm2'+str(name))
         acti2 = mx.sym.Activation(normi2, act_type='relu', name='rel2'+str(name))
         return acti2
@@ -177,11 +177,11 @@ def build_symbol(iterator, preprocessor, blocks, channels):
 
     # Embed data to 16 channels
     embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
-    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0,2,1)), shape=(0, 0, 1, -1))
+    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0,2,1)), shape=(0, 0, -1))
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Temporal Convolutional Layer
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
+    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(3), num_filter=64, pad=(1))
     print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between
@@ -196,10 +196,10 @@ def build_symbol(iterator, preprocessor, blocks, channels):
                 block = conv_block(block, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
             print('\tblock'+str(i)+'_'+str(j), block.infer_shape(data=X_shape)[1][0])
         if i != len(blocks)-1:
-            pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
+            pool = mx.sym.Pooling(block, kernel=(3), stride=(2), pad=(1), pool_type='max')
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
-    final_pool = mx.sym.Pooling(block, kernel=(1, 16), stride=(1, 16), pad=(0, 1), pool_type='max')
+    final_pool = mx.sym.Pooling(block, kernel=(16), stride=(16), pad=(1), pool_type='max')
     print("final pool output: ", final_pool.infer_shape(data=X_shape)[1][0])
 
     # Fully connected layers

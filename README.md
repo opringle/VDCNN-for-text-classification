@@ -27,8 +27,11 @@ implementing this paper in MXNet: https://arxiv.org/pdf/1606.01781.pdf
 ### Performance on Atb model 41
 
 - Using s=128 ensures ~ 0.05% of training data is sliced & trains at 17s per epoch
-- Small learning rates (0.0001) cause the validation score to be drastically less than the training score. 0.001 works nicely.
-- At training accuracy >80%, validation loss finally starts to approximate training loss (dropout = 0.2)
+- Small learning rates (0.0001) cause the validation score to be drastically less than the training score. 0.002 works nicely.
+- Dropout 0.2 keeping things stable
+
+
+- At training accuracy >X%, validation loss finally starts to approximate training loss (dropout = X)
 - Dropout=0.X ensures validation loss plateaus @Y epochs
 - Initializing hyperparams with X ensures robust validation score during training
 - [X] Validation accuracy > 70%

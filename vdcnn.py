@@ -205,7 +205,7 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
 
     if final_pool:
         pool_kernel_size = args.sequence_length // 64
-        block = mx.sym.Pooling(block, kernel=(1, pool_kernel_size), stride=(1, pool_kernel_size), pad=(0, 1), pool_type='max')
+        block = mx.sym.Pooling(block, kernel=(1, pool_kernel_size), stride=(1, pool_kernel_size), pad=(0, 0), pool_type='max')
         print("final pool output: ", block.infer_shape(data=X_shape)[1][0])
 
     # Fully connected layers

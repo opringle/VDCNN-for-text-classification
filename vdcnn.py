@@ -133,8 +133,8 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, pad_value=len(alphabet)-1,
-                                         unknown_char_index=len(alphabet), char_to_index=alphabet)
+    preprocessor = UtterancePreprocessor(length=args.sequence_length, pad_value=len(alphabet),
+                                         unknown_char_index=len(alphabet)+1, char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
 
     # Transform data
@@ -167,10 +167,10 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
 
     def conv_block(data, num_filter, name):
         convi1 = mx.sym.Convolution(data, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv1'+str(name))
-        normi1 = mx.sym.BatchNorm(convi1, axis=-1, name='norm1'+str(name))
+        normi1 = mx.sym.BatchNorm(convi1, axis=1, name='norm1'+str(name))
         acti1 = mx.sym.Activation(normi1, act_type='relu', name='rel1'+str(name))
         convi2 = mx.sym.Convolution(acti1, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv2'+str(name))
-        normi2 = mx.sym.BatchNorm(convi2, axis=-1, name='norm2'+str(name))
+        normi2 = mx.sym.BatchNorm(convi2, axis=1, name='norm2'+str(name))
         acti2 = mx.sym.Activation(normi2, act_type='relu', name='rel2'+str(name))
         return acti2
 

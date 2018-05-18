@@ -121,21 +121,23 @@ class UtterancePreprocessor:
         return self.label_to_index.get(label)
 
 
-def build_iters(train_df, test_df):
+def build_iters(train_df, test_df, feature_col, label_col):
     """
     :param train_df: pandas dataframe of training data
     :param test_df: pandas dataframe of test data
+    :param feature_col: column in dataframe corresponding to text
+    :param label_col: column in dataframe corresponding to label
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
     preprocessor = UtterancePreprocessor(length=args.sequence_length, pad_value=-1, unknown_char_index=-2)
-    preprocessor.fit(train_df['description'].values.tolist(), train_df['class'].values.tolist())
+    preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
 
     # Transform data
-    train_df['X'] = train_df['description'].apply(preprocessor.transform_utterance)
-    test_df['X'] = test_df['description'].apply(preprocessor.transform_utterance)
-    train_df['Y'] = train_df['class'].apply(preprocessor.transform_label)
-    test_df['Y'] = test_df['class'].apply(preprocessor.transform_label)
+    train_df['X'] = train_df[feature_col].apply(preprocessor.transform_utterance)
+    test_df['X'] = test_df[feature_col].apply(preprocessor.transform_utterance)
+    train_df['Y'] = train_df[label_col].apply(preprocessor.transform_label)
+    test_df['Y'] = test_df[label_col].apply(preprocessor.transform_label)
     print("{} utterances were padded & {} utterances were sliced to length = {}".format(preprocessor.padded_data,
                                                                                         preprocessor.sliced_data,
                                                                                         preprocessor.length))
@@ -252,11 +254,11 @@ if __name__ == '__main__':
     os.mkdir(args.output_dir) if not os.path.exists(args.output_dir) else None
 
     # Read training data into pandas data frames
-    train_df = pd.read_csv(os.path.join(args.data, "train.csv"), names=["class", "title", "description"])
-    test_df = pd.read_csv(os.path.join(args.data, "test.csv"), names=["class", "title", "description"])
+    train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
+    test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
 
     # Build data iterators
-    preprocessor, train_iter, val_iter = build_iters(train_df, test_df)
+    preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent')
 
     # Build network graph
     symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels)

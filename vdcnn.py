@@ -48,7 +48,7 @@ parser.add_argument('--optimizer', type=str, default='Adam',
                     help='optimization algorithm to update model parameters with')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='learning rate for chosen optimizer')
-parser.add_argument('--dropout', type=float, default=0.0,
+parser.add_argument('--dropout', type=float, default=0.2,
                     help='dropout regularization probability')
 parser.add_argument('--blocks', type=str, default='2,2,2,2',
                     help='Number of conv blocks in each component of the network')
@@ -142,6 +142,7 @@ def build_iters(train_df, test_df, feature_col, label_col):
                                                                                         preprocessor.sliced_data,
                                                                                         preprocessor.length))
 
+    print(train_df.head())
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
     Y_train, Y_test = np.array(train_df['Y'].values.tolist()), np.array(test_df['Y'].values.tolist())
@@ -208,14 +209,14 @@ def build_symbol(iterator, preprocessor, blocks, channels):
     act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
     print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
 
-    if args.dropout > 0:
+    if args.dropout != 0:
         act1 = mx.sym.Dropout(act1, p=args.dropout)
 
     fc2 = mx.sym.FullyConnected(act1, num_hidden=2048, flatten=True, name='fc2')
     act2 = mx.sym.Activation(fc2, act_type='relu', name='fc2_act')
     print("fc2 output: ", fc2.infer_shape(data=X_shape)[1][0])
 
-    if args.dropout > 0:
+    if args.dropout != 0:
         act2 = mx.sym.Dropout(act2, p=args.dropout)
 
     output = mx.sym.FullyConnected(act2, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')

@@ -54,6 +54,8 @@ parser.add_argument('--blocks', type=str, default='2,2,2,2',
                     help='Number of conv blocks in each component of the network')
 parser.add_argument('--channels', type=str, default='64,128,256,512',
                     help='Number of channels in each conv block')
+parser.add_argument('--final-pool', action='store_true',
+                    help='Number of channels in each conv block')
 
 
 class UtterancePreprocessor:
@@ -156,7 +158,7 @@ def build_iters(train_df, test_df, feature_col, label_col):
     return preprocessor, train_iter, test_iter
 
 
-def build_symbol(iterator, preprocessor, blocks, channels):
+def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     """
     :return:  MXNet symbol object
     """
@@ -201,11 +203,12 @@ def build_symbol(iterator, preprocessor, blocks, channels):
             pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
-    final_pool = mx.sym.Pooling(block, kernel=(1, 16), stride=(1, 16), pad=(0, 1), pool_type='max')
-    print("final pool output: ", final_pool.infer_shape(data=X_shape)[1][0])
+    if final_pool:
+        block = mx.sym.Pooling(block, kernel=(1, 16), stride=(1, 16), pad=(0, 1), pool_type='max')
+        print("final pool output: ", block.infer_shape(data=X_shape)[1][0])
 
     # Fully connected layers
-    fc1 = mx.sym.FullyConnected(final_pool, num_hidden=2048, flatten=True, name='fc1')
+    fc1 = mx.sym.FullyConnected(block, num_hidden=2048, flatten=True, name='fc1')
     act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
     print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
 
@@ -262,7 +265,7 @@ if __name__ == '__main__':
     preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent')
 
     # Build network graph
-    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels)
+    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)
 
     # Train the model
     trained_module = train(symbol, train_iter, val_iter)

@@ -237,29 +237,13 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("data_input: ", data.infer_shape(data=X_shape)[1][0])
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
-    if args.encode:
-        # One hot encode each char, exclude padded chars
-        embedded_data = mx.sym.one_hot(data, depth=len(preprocessor.char_to_index))
+    # Assign each character a 16 dimensional vector
+    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
+    embedded_data = mx.sym.Reshape(embedded_data, shape=(0, 1, 0, -1))
+    print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
-        # Reshape to (batchsize, 1, onehot, seq len)
-        embedded_data = mx.sym.BlockGrad(mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0,2,1)), shape=(0, 1, len(preprocessor.char_to_index), -1)))
-        print("encoded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
-
-    else:
-        # # Initialize word embedding matrix
-        # char_embeddings = mx.sym.Variable('char_embeds')
-        # char_embeddings.bind(mx.cpu(), {'char_embeds': mx.ndarray.random.normal(scale=0.01, shape=(len(preprocessor.char_to_index), 16))})
-        # zero_embedding = mx.sym.BlockGrad(mx.sym.zeros(shape=(1, 16))) # embedding for padded chars is always zeros
-        # embeddings = mx.sym.concat(*[char_embeddings, zero_embedding], dim=0)
-        # print("embedding matrix shape: ", embeddings.infer_shape()[1][0])
-
-        # Embed data to 16 channels
-        embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
-        embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
-        print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
-
-    # Temporal Convolutional Layer
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(len(preprocessor.char_to_index), 3), num_filter=64, pad=(0, 1))
+    # Temporal Convolutional Layer, each kernel overlaps 3 character vectors per position
+    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(16, 3), num_filter=64, pad=(0, 1))
     print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between

@@ -237,13 +237,15 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("data_input: ", data.infer_shape(data=X_shape)[1][0])
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
-    # Assign each character a 16 dimensional vector
+    # Embed each character to 16 channels
     embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
-    embedded_data = mx.sym.Reshape(embedded_data, shape=(0, 1, 0, -1))
+    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Temporal Convolutional Layer, each kernel overlaps 3 character vectors per position
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(16, 3), num_filter=64, pad=(0, 1))
+    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
+    temp_norm_1 = mx.sym.BatchNorm(temp_conv_1, axis=1)
+    temp_act_1 = mx.sym.Activation(temp_norm_1, act_type='relu')
     print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between
@@ -251,7 +253,7 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
         print("section {} ({} blocks)".format(i, block_size))
         for j in list(range(block_size)):
             if i == 0 and j == 0:
-                block = conv_block(temp_conv_1, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
+                block = conv_block(temp_act_1, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
             elif j == 0:
                 block = conv_block(pool, num_filter=channels[i], name='block' + str(i) + '_' + str(j))
             else:

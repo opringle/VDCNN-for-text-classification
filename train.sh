@@ -26,9 +26,7 @@
 
 # Dropout massively slows training...
 # python vdcnn.py --gpus=0 --data=../../finn-dl/MODEL/atb_model_41/strat_split/data/ --sequence-length=128 --batch-size=128 --lr=0.001 --blocks='2,2,2,2' --channels='64,128,256,512' --final-pool
-python vdcnn.py --gpus=0 --data=../../finn-dl/MODEL/atb_model_41/strat_split/data/ --sequence-length=128 --batch-size=128 --lr=0.0001 --blocks='5,5,2,2' --channels='64,128,256,512' --encode
-
-
 
 # This should achieve ~ 91.27% validation accuracy
 # python vdcnn.py --gpus=0 --sequence-length=128 --batch-size=128 --lr=0.001 --blocks='5,5,2,2' --channels='64,128,256,512' --final-pool
+python vdcnn.py --gpus=0 --data=../../finn-dl/MODEL/atb_model_41/strat_split/data/ --sequence-length=256 --batch-size=512 --lr=0.0001 --blocks='2,2,2,2' --channels='64,128,256,512'

@@ -205,11 +205,7 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
                                                                                         preprocessor.sliced_data,
                                                                                         preprocessor.length))
 
-    print(test_df[['utterance', 'X']].head(20))
-    print(test_df.iloc[6, 0])
-    print(test_df.iloc[6, 3])
-    print(preprocessor.char_to_index)
-    print(len(preprocessor.char_to_index))
+    print("vocabulary used in lookup table: {}".format(preprocessor.char_to_index))
 
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
@@ -272,8 +268,6 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
     if args.final_pool:
-        # pool_kernel_size = args.sequence_length // 64
-        #block = mx.sym.Pooling(block, kernel=(1, pool_kernel_size), stride=(1, pool_kernel_size), pad=(0, 0), pool_type='max')
         block = mx.sym.transpose(mx.symbol.Custom(data=mx.sym.transpose(block, axes=(0, 1, 3, 2)), name='8_max_pool', op_type='k_max_pool', k=8), axes=(0, 1, 3, 2))
         print("k max pool output: ", block.infer_shape(data=X_shape)[1][0])
 

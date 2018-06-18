@@ -210,7 +210,7 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
     Y_train, Y_test = np.array(train_df['Y'].values.tolist()), np.array(test_df['Y'].values.tolist())
-    print(X_train.shape, Y_train.shape)
+    print("Training utterances: {}\nTesting utterances: {}".format(X_train.shape[0], X_test.shape[0]))
 
     # Build MXNet data iterators
     train_iter = mx.io.NDArrayIter(data=X_train, label=Y_train, batch_size=args.batch_size, shuffle=True,

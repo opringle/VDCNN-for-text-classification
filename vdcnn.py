@@ -107,15 +107,14 @@ class k_max_poolProp(mx.operator.CustomOpProp):
   def create_operator(self, ctx, shapes, dtypes):
     return k_max_pool(self.k)
 
-
 class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, pad_value, unknown_char_index, char_to_index=None):
+    def __init__(self, length, unknown_char_index, char_to_index=None, pad_char='~'):
         self.length = length
-        self.pad_value = pad_value
-        self.unknown_char_index = unknown_char_index
+        self.pad_char = pad_char
+        self.unknown_char_index = unknown_char_index #should this be a random char from the dict?
         self.padded_data = 0
         self.sliced_data = 0
         self.char_to_index = char_to_index
@@ -141,7 +140,7 @@ class UtterancePreprocessor:
         diff = self.length - len(utterance)
         if diff > 0:
             self.padded_data += 1
-            utterance.extend([self.pad_value] * diff)
+            utterance.extend([self.pad_char] * diff)
             return utterance
         else:
             self.sliced_data += 1
@@ -156,15 +155,19 @@ class UtterancePreprocessor:
         self.char_to_index = self.build_vocab(chars, depth=2) if not self.char_to_index else self.char_to_index
         self.label_to_index = self.build_vocab(labels, depth=1)
 
+        if self.pad_char not in self.char_to_index:
+            print("Warning, padded data char: `{}` is not in vocabulary. Adding now.".format(self.pad_char))
+            self.char_to_index[self.pad_char] = len(self.char_to_index)
+
     def transform_utterance(self, utterance):
         """
         :param utterance:
         :return: split and indexed utterance
         """
         split_utterance = list(utterance.lower())
-        indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in split_utterance]
-        padded_utterance = self.pad_utterance(indexed_utterance)
-        return padded_utterance
+        padded_utterance = self.pad_utterance(split_utterance)
+        indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in padded_utterance]
+        return indexed_utterance
 
     def transform_label(self, label):
         """
@@ -183,15 +186,15 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, char_to_index=alphabet,
-                                         unknown_char_index=-1, pad_value=-2)
+    preprocessor = UtterancePreprocessor(length=args.sequence_length, unknown_char_index=len(alphabet),
+                                         char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
 
-    # When we encounter an unknown char in deployment we will look up the last vector in the embedding matrix
-    preprocessor.unknown_char_index, preprocessor.pad_value = len(preprocessor.char_to_index), \
-                                                              len(preprocessor.char_to_index)
+    print("index of unknown characters = {}\n"
+          "padded characters represented as = {}\n"
+          "index of pad char in dict: {}".format(preprocessor.unknown_char_index, preprocessor.pad_char,
+                                                 alphabet[preprocessor.pad_char]))
 
-    print("index of unknown characters = {}\nindex of padded characters = {}".format(preprocessor.unknown_char_index, preprocessor.pad_value))
 
     # Transform data
     train_df['X'] = train_df[feature_col].apply(preprocessor.transform_utterance)
@@ -202,7 +205,12 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
                                                                                         preprocessor.sliced_data,
                                                                                         preprocessor.length))
 
-    print(train_df.head())
+    print(test_df[['utterance', 'X']].head(20))
+    print(test_df.iloc[6, 0])
+    print(test_df.iloc[6, 3])
+    print(preprocessor.char_to_index)
+    print(len(preprocessor.char_to_index))
+
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
     Y_train, Y_test = np.array(train_df['Y'].values.tolist()), np.array(test_df['Y'].values.tolist())
@@ -323,13 +331,13 @@ if __name__ == '__main__':
     train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
     test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
 
-    # Define vocab
-    alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} '
+    # Define vocab (if unknown characters are encountered they are replaced with final value in alphabet)
+    alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'
     char_to_index = {k: v for v, k in enumerate(list(alph))}
 
     # Build data iterators
     preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent',
-                                                     alphabet=None)
+                                                     alphabet=char_to_index)
 
     # Build network graph
     symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)

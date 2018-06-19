@@ -46,6 +46,8 @@ parser.add_argument('--batch-size', type=int, default=512,
                     help='the number of training records in each minibatch')
 parser.add_argument('--sequence-length', type=int, default=1024,
                     help='the number of characters in each training example')
+parser.add_argument('--fc-size', type=int, default=2048,
+                    help='the number of hidden units in each fully connected layer')
 parser.add_argument('--optimizer', type=str, default='SGD',
                     help='optimization algorithm to update model parameters with')
 parser.add_argument('--lr', type=float, default=0.01,
@@ -274,14 +276,14 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
         print("k max pool output: ", block.infer_shape(data=X_shape)[1][0])
 
     # Fully connected layers
-    fc1 = mx.sym.FullyConnected(block, num_hidden=2048, flatten=True, name='fc1')
+    fc1 = mx.sym.FullyConnected(block, num_hidden=args.fc_size, flatten=True, name='fc1')
     act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
     print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
 
     if args.hidden_dropout != 0:
         act1 = mx.sym.Dropout(act1, p=args.hidden_dropout)
 
-    fc2 = mx.sym.FullyConnected(act1, num_hidden=2048, flatten=True, name='fc2')
+    fc2 = mx.sym.FullyConnected(act1, num_hidden=args.fc_size, flatten=True, name='fc2')
     act2 = mx.sym.Activation(fc2, act_type='relu', name='fc2_act')
     print("fc2 output: ", fc2.infer_shape(data=X_shape)[1][0])
 

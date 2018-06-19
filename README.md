@@ -5,7 +5,8 @@ implementing this paper in MXNet: https://arxiv.org/pdf/1606.01781.pdf
 
 - [ ] Convert k-max-pool to use ndarray
 - [ ] Train effectively on AG news dataset (overnight will take 14 hours)
-- [ ] Understand why learning takes so many more epochs in my implementation
+- [ ] Initialize weights according to paper
+- [ ] Use their optimizer
 
 ## Insights
 

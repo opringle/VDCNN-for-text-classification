@@ -46,9 +46,9 @@ parser.add_argument('--batch-size', type=int, default=512,
                     help='the number of training records in each minibatch')
 parser.add_argument('--sequence-length', type=int, default=1024,
                     help='the number of characters in each training example')
-parser.add_argument('--optimizer', type=str, default='Adam',
+parser.add_argument('--optimizer', type=str, default='SGD',
                     help='optimization algorithm to update model parameters with')
-parser.add_argument('--lr', type=float, default=0.001,
+parser.add_argument('--lr', type=float, default=0.01,
                     help='learning rate for chosen optimizer')
 parser.add_argument('--l2', type=float, default=0.0,
                     help='l2 regularization coefficient')
@@ -308,8 +308,8 @@ def train(symbol, train_iter, val_iter):
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},
-               initializer=mx.initializer.Normal(0.01),
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'momentum': 0.9},
+               initializer=mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
                num_epoch=args.num_epochs)
     return module
 

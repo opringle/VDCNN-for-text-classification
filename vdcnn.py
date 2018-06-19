@@ -57,7 +57,7 @@ parser.add_argument('--blocks', type=str, default='2,2,2,2',
 parser.add_argument('--channels', type=str, default='64,128,256,512',
                     help='Number of channels in each conv block')
 parser.add_argument('--final-pool', action='store_true',
-                    help='Number of channels in each conv block')
+                    help='Apply 8 max pooling at the final layer')
 parser.add_argument('--encode', action='store_true',
                     help='Whether to encode or embed chars')
 
@@ -210,7 +210,6 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
     Y_train, Y_test = np.array(train_df['Y'].values.tolist()), np.array(test_df['Y'].values.tolist())
-    print("Training utterances: {}\nTesting utterances: {}".format(X_train.shape[0], X_test.shape[0]))
 
     # Build MXNet data iterators
     train_iter = mx.io.NDArrayIter(data=X_train, label=Y_train, batch_size=args.batch_size, shuffle=True,
@@ -312,6 +311,17 @@ def train(symbol, train_iter, val_iter):
     return module
 
 
+def summarize_data(df, name):
+    """
+    computes statistics on text classification dataframes
+    """
+    df['n_chars'] = df['utterance'].apply(lambda x: len(x))
+    print("\n{} summary:".format(name))
+    print("\tAverage characters per utterance: {0:.2f}".format(df['n_chars'].mean()))
+    print("\tStandard deviation characters per utterance: {0:.2f}".format(df['n_chars'].std()))
+    print("\tTotal utterances in df: {}".format(df.shape[0]))
+    print("\tText Classes: {}".format(len(df['intent'].unique())))
+
 if __name__ == '__main__':
     # Parse args
     args = parser.parse_args()
@@ -324,6 +334,8 @@ if __name__ == '__main__':
     # Read training data into pandas data frames
     train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
     test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
+    summarize_data(train_df, 'Training data')
+    summarize_data(test_df, 'Test data')
 
     # Define vocab (if unknown characters are encountered they are replaced with final value in alphabet)
     alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'

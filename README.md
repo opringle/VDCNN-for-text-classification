@@ -1,22 +1,27 @@
 # VDCNN-for-text-classification
 implementing this paper in MXNet: https://arxiv.org/pdf/1606.01781.pdf
 
-- Do not use skip connections
-
 ## ToDo
 
-1. Convert k-max-pool to use ndarray
-2. train effectively on AG news dataset (overnight will take 14 hours)
-3. Understand why learning takes so many more epochs in my implementation
+- [ ] Convert k-max-pool to use ndarray
+- [ ] Train effectively on AG news dataset (overnight will take 14 hours)
+- [ ] Understand why learning takes so many more epochs in my implementation
 
 ## Insights
 
 ### How to treat padded data and unknown data
 
-- When an unknown character is encountered, we should return a vector of zeros to ensure the prediction is not effected.
-- Currently unknown chars and padded chars are treated as whitespace
+- When an unknown character is encountered, we should return a random character embedding.
+- Pad characters should have an embedding which is learned in training.
 
+### Representing categorical text data
 
+- Embedding characters makes less intuitive sense than representing them as categorical features.... Humans don't assign meaning to the letter a. We just look for patterns of a's.
+
+### AGNews Dataset vs Finn Banking Data
+
+- AGNews dataset has signficantly longer utterances (average chars = 190). This model is best trained with s=1024. This is equivolent to training an image detection network on higher resolution images. There is more signal in the data and so the model converges easily (13 epochs).
+- Finn dataset
 
 
 ### Training compared to word-CNN model

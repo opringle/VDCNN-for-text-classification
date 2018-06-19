@@ -27,6 +27,8 @@ import argparse
 import logging
 import os
 import ast
+from random import randint
+
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -166,7 +168,8 @@ class UtterancePreprocessor:
         """
         split_utterance = list(utterance.lower())
         padded_utterance = self.pad_utterance(split_utterance)
-        indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in padded_utterance]
+        indexed_utterance = [self.char_to_index.get(char, randint(0,len(self.char_to_index))) for char in padded_utterance]
+        # indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in padded_utterance]
         return indexed_utterance
 
     def transform_label(self, label):
@@ -226,10 +229,10 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
 
     def conv_block(data, num_filter, name):
         convi1 = mx.sym.Convolution(data, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv1'+str(name))
-        normi1 = mx.sym.BatchNorm(convi1, axis=1, name='norm1'+str(name))
+        normi1 = mx.sym.BatchNorm(convi1, axis=2, name='norm1'+str(name))
         acti1 = mx.sym.Activation(normi1, act_type='relu', name='rel1'+str(name))
         convi2 = mx.sym.Convolution(acti1, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv2'+str(name))
-        normi2 = mx.sym.BatchNorm(convi2, axis=1, name='norm2'+str(name))
+        normi2 = mx.sym.BatchNorm(convi2, axis=2, name='norm2'+str(name))
         acti2 = mx.sym.Activation(normi2, act_type='relu', name='rel2'+str(name))
         return acti2
 

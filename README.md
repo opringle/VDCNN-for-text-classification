@@ -9,6 +9,16 @@ implementing this paper in MXNet: https://arxiv.org/pdf/1606.01781.pdf
 
 ## Insights
 
+### Unable to match paper performance on public data
+
+- batch norm could be wrong?
+
+### Unstable validation score
+
+- The validation score during training on all datasets fluctuates between the training score and -20%.
+- It is possible the model is learning to classify using the patterns in padded data. This could provide enough signal distinguish some utterances between classes.
+- Reducing the sequence length, and therefore the padding, stabilizes the model but forces us to truncate more utterances, loosing valuable signal.
+
 ### How to treat padded data and unknown data
 
 - When an unknown character is encountered, we should return a random character embedding.
@@ -21,7 +31,7 @@ implementing this paper in MXNet: https://arxiv.org/pdf/1606.01781.pdf
 ### AGNews Dataset vs Finn Banking Data
 
 - AGNews dataset has signficantly longer utterances (average chars = 190). This model is best trained with s=1024. This is equivolent to training an image detection network on higher resolution images. There is more signal in the data and so the model converges easily (13 epochs).
-- Finn dataset
+- Finn dataset has 34 characters on average with standard deviation 20.
 
 
 ### Training compared to word-CNN model

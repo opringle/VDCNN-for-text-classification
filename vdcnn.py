@@ -310,8 +310,8 @@ def train(symbol, train_iter, val_iter):
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'momentum': 0.9},
-               initializer=mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},#, 'momentum': 0.9},
+               initializer=mx.initializer.Normal(),
                num_epoch=args.num_epochs)
     return module
 
@@ -327,7 +327,11 @@ def summarize_data(df, name):
     print("\tTotal utterances in df: {}".format(df.shape[0]))
     print("\tText Classes: {}".format(len(df['intent'].unique())))
 
+
 if __name__ == '__main__':
+
+    # os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'
+
     # Parse args
     args = parser.parse_args()
     args.blocks = ast.literal_eval(args.blocks)

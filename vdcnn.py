@@ -284,12 +284,18 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Temporal Convolutional Layer, each kernel overlaps 3 character vectors per position
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
-    temp_norm_1 = mx.sym.BatchNorm(temp_conv_1, axis=1)
-    temp_act_1 = mx.sym.Activation(temp_norm_1, act_type='relu')
-    print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
+    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 7), stride=(1, 2), pad=(0, 3), num_filter=64)
+    temp_act_1 = mx.sym.Activation(temp_conv_1, act_type='relu')
+    temp_pool_1 = mx.sym.Pooling(temp_act_1, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
+    temp_conv_2 = mx.sym.Convolution(temp_pool_1, kernel=(1, 3), stride=(1, 1), pad=(0, 1), num_filter=64)
+    temp_act_2 = mx.sym.Activation(temp_conv_2, act_type='relu')
+    temp_conv_3 = mx.sym.Convolution(temp_act_2, kernel=(1, 3), stride=(1, 2), pad=(0, 1), num_filter=192)
+    temp_act_3 = mx.sym.Activation(temp_conv_3, act_type='relu')
+    temp_pool_2 = mx.sym.Pooling(temp_act_3, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
 
-    # # Create convolutional blocks with pooling in-between
+    print("temp conv output: ", temp_pool_2.infer_shape(data=X_shape)[1][0])
+
+    # Create convolutional blocks with pooling in-between
     # for i, block_size in enumerate(blocks):
     #     print("section {} ({} blocks)".format(i, block_size))
     #     for j in list(range(block_size)):
@@ -309,12 +315,14 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     #         print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between
+    reductions = [{'1X3': 96, '1X5': 16}]
+    filters = [{'1X1': 64, '1X3': 128, '1X5': 32, 'pool_proj': 32}]
     for i, block_size in enumerate(blocks):
         print("section {} ({} blocks)".format(i, block_size))
         for j in list(range(block_size)):
             if i == 0 and j == 0:
                 # first block follows the first temp conv layer
-                block = inception_block(temp_act_1,
+                block = inception_block(temp_pool_2,
                                         reductions={'1X3': 96, '1X5': 16},
                                         filters={'1X1': 64, '1X3': 128, '1X5': 32, 'pool_proj': 32},
                                         name='block'+str(i)+'_'+str(j))

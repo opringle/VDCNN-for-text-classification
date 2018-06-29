@@ -27,6 +27,7 @@ import argparse
 import logging
 import os
 import ast
+import regex as re
 from random import randint
 
 
@@ -44,8 +45,10 @@ parser.add_argument('--num-epochs', type=int, default=256,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=512,
                     help='the number of training records in each minibatch')
-parser.add_argument('--sequence-length', type=int, default=1024,
-                    help='the number of characters in each training example')
+parser.add_argument('--max-words', type=int, default=20,
+                    help='the number of words in each utterance')
+parser.add_argument('--max-word-length', type=int, default=20,
+                    help='the number of characters in each word')
 parser.add_argument('--fc-size', type=int, default=2048,
                     help='the number of hidden units in each fully connected layer')
 parser.add_argument('--optimizer', type=str, default='SGD',
@@ -54,12 +57,16 @@ parser.add_argument('--lr', type=float, default=0.01,
                     help='learning rate for chosen optimizer')
 parser.add_argument('--l2', type=float, default=0.0,
                     help='l2 regularization coefficient')
+parser.add_argument('--smooth-alpha', type=float, default=0.0,
+                    help='label smoothing coefficient')
 parser.add_argument('--fc-dropout', type=float, default=0.0,
                     help='dropout regularization probability for hidden units')
-parser.add_argument('--blocks', type=str, default='2,2,2,2',
+parser.add_argument('--blocks', type=str, default='3,5,2',
                     help='Number of conv blocks in each component of the network')
-parser.add_argument('--channels', type=str, default='64,128,256,512',
+parser.add_argument('--channels', type=str, default='64,128,256',
                     help='Number of channels in each conv block')
+parser.add_argument('--max-train-utt-per-intent', type=int, default=512,
+                    help='the number of training records in each minibatch')
 
 
 class k_max_pool(mx.operator.CustomOp):
@@ -111,8 +118,9 @@ class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, unknown_char_index, char_to_index=None, pad_char='~'):
-        self.length = length
+    def __init__(self, max_words, max_word_length, unknown_char_index, char_to_index=None, pad_char='~'):
+        self.max_words = max_words
+        self.max_word_length = max_word_length
         self.pad_char = pad_char
         self.unknown_char_index = unknown_char_index #should this be a random char from the dict?
         self.padded_data = 0
@@ -130,21 +138,42 @@ class UtterancePreprocessor:
             data = list(chain.from_iterable(data))
         return {k: v for v, k in enumerate(set(data))}
 
-    def pad_utterance(self, utterance):
+    def split_utterance(self, string):
         """
-        :param utterance: list of int
-        :param length: desired output length
-        :param pad_value: integer to use for padding
-        :return: list of int
+        :param utterance: string
+        :return: list of string, split using regex
         """
-        diff = self.length - len(utterance)
+        string = re.sub(r"[[0-9]*(\\.[0-9]*)?]", "", string)
+        string = re.sub(r"(')", "", string)
+        string = re.sub(r"[^A-Za-z0-9(),!?\'\`]", " ", string)
+        string = re.sub(r"\'s", " \'s", string)
+        string = re.sub(r"\'ve", " \'ve", string)
+        string = re.sub(r"n\'t", " n\'t", string)
+        string = re.sub(r"\'re", " \'re", string)
+        string = re.sub(r"\'d", " \'d", string)
+        string = re.sub(r"\'ll", " \'ll", string)
+        string = re.sub(r",", " , ", string)
+        string = re.sub(r"!", " ! ", string)
+        string = re.sub(r"\(", " \( ", string)
+        string = re.sub(r"\)", " \) ", string)
+        string = re.sub(r"\?", " \? ", string)
+        string = re.sub(r"\s{2,}", " ", string)
+        return string.strip().lower().split(" ")
+
+    def pad_list(self, list, length):
+        """
+        :param list:
+        :param length:
+        :return:
+        """
+        diff = length - len(list)
         if diff > 0:
             self.padded_data += 1
-            utterance.extend([self.pad_char] * diff)
-            return utterance
+            list.extend([self.pad_char] * diff)
+            return list
         else:
             self.sliced_data += 1
-            return utterance[:self.length]
+            return list[:length]
 
     def fit(self, utterances, labels):
         """
@@ -164,10 +193,12 @@ class UtterancePreprocessor:
         :param utterance:
         :return: split and indexed utterance
         """
-        split_utterance = list(utterance.lower())
-        padded_utterance = self.pad_utterance(split_utterance)
-        # indexed_utterance = [self.char_to_index.get(char, randint(0,len(self.char_to_index))) for char in padded_utterance]
-        indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in padded_utterance]
+        tokenized_utterance = self.split_utterance(utterance)
+        padded_utterance = self.pad_list(tokenized_utterance, self.max_words)
+        char_tokenized_utterance = [list(token) for token in padded_utterance]
+        padded_tokenized_utterance = [self.pad_list(charlist, self.max_word_length) for charlist in char_tokenized_utterance]
+        indexed_utterance = [[self.char_to_index.get(char, self.unknown_char_index) for char in charlist]
+                             for charlist in padded_tokenized_utterance]
         return indexed_utterance
 
     def transform_label(self, label):
@@ -187,9 +218,11 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, unknown_char_index=len(alphabet),
+    preprocessor = UtterancePreprocessor(args.max_words, args.max_word_length, unknown_char_index=len(alphabet),
                                          char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
+
+    print(preprocessor.transform_utterance("I want to log in!"))
 
     print("index of unknown characters = {}\n"
           "padded characters represented as = {}\n"
@@ -202,9 +235,10 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     test_df['X'] = test_df[feature_col].apply(preprocessor.transform_utterance)
     train_df['Y'] = train_df[label_col].apply(preprocessor.transform_label)
     test_df['Y'] = test_df[label_col].apply(preprocessor.transform_label)
-    print("{} utterances were padded & {} utterances were sliced to length = {}".format(preprocessor.padded_data,
+    print("{} utterances were padded & {} utterances were sliced to {} tokens and {} characters".format(preprocessor.padded_data,
                                                                                         preprocessor.sliced_data,
-                                                                                        preprocessor.length))
+                                                                                        preprocessor.max_words,
+                                                                                                        preprocessor.max_word_length))
 
     print("vocabulary used in lookup table: {}".format(preprocessor.char_to_index))
 
@@ -220,7 +254,7 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     return preprocessor, train_iter, test_iter
 
 
-def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
+def build_symbol(iterator, preprocessor, blocks, channels):
     """
     :return:  MXNet symbol object
     """
@@ -242,29 +276,29 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
 
         reduce_3 = conv(data, num_filter=3*x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X3_reduce' + str(name))
         if reduce_grid:
-            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X3_conv' + str(name))
+            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(3, 3), stride=(2, 2), pad=(0, 0), name='1X3_conv' + str(name))
         else:
-            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X3_conv' + str(name))
+            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(3, 3), stride=(1, 1), pad=(1, 1), name='1X3_conv' + str(name))
         # print("\t1X3 conv output: ", conv_3.infer_shape(data=X_shape)[1][0])
 
         reduce_5 = conv(data, num_filter=int(x/2), kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X5_reduce' + str(name))
-        conv_5_0 = conv(reduce_5, num_filter=x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X5_conv1' + str(name))
+        conv_5_0 = conv(reduce_5, num_filter=x, kernel=(3, 3), stride=(1, 1), pad=(1, 1), name='1X5_conv1' + str(name))
         if reduce_grid:
-            conv_5 = conv(conv_5_0, num_filter=x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X5_conv2' + str(name))
+            conv_5 = conv(conv_5_0, num_filter=4*x, kernel=(3, 3), stride=(2, 2), pad=(0, 0), name='1X5_conv2' + str(name))
         else:
-            conv_5 = conv(conv_5_0, num_filter=x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X5_conv2' + str(name))
+            conv_5 = conv(conv_5_0, num_filter=x, kernel=(3, 3), stride=(1, 1), pad=(1, 1), name='1X5_conv2' + str(name))
         # print("\t1X5 conv output: ", conv_5.infer_shape(data=X_shape)[1][0])
 
         if reduce_grid:
-            pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='1X3_pool')
+            pool = mx.sym.Pooling(data, kernel=(3, 3), stride=(2, 2), pad=(0, 0), pool_type='max', name='1X3_pool')
         else:
-            pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='max', name='1X3_pool')
-        conv_pool = conv(pool, num_filter=x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
+            pool = mx.sym.Pooling(data, kernel=(3, 3), stride=(1, 1), pad=(1, 1), pool_type='max', name='1X3_pool')
+            conv_pool = conv(pool, num_filter=x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
         # print("\t1X1 pool output: ", conv_pool.infer_shape(data=X_shape)[1][0])
 
         # concatenate channels
         if reduce_grid:
-            concat = mx.sym.Concat(*[conv_3, conv_5, conv_pool], dim=1, name=str(name))
+            concat = mx.sym.Concat(*[conv_3, conv_5, pool], dim=1, name=str(name))
         else:
             concat = mx.sym.Concat(*[conv_1, conv_3, conv_5, conv_pool], dim=1, name=str(name))
         # print("\tdepth concat output: ", concat.infer_shape(data=X_shape)[1][0])
@@ -279,33 +313,33 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
 
     # Embed each character to 16 channels
     embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
-    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
+    embedded_data = mx.sym.transpose(embedded_data, axes=(0, 3, 1, 2))
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Initial conv layers
-    conv1 = conv(embedded_data, num_filter=32, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv1')
-    print("conv1 output: ", conv1.infer_shape(data=X_shape)[1][0])
-    conv2 = conv(conv1, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv2')
-    print("conv2 output: ", conv2.infer_shape(data=X_shape)[1][0])
-    conv_3 = conv(conv2, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv3')
-    print("conv3 output: ", conv_3.infer_shape(data=X_shape)[1][0])
-    pool_1 = mx.sym.Pooling(conv_3, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='pool')
-    print("poool1 output: ", pool_1.infer_shape(data=X_shape)[1][0])
-    conv_4 = conv(pool_1, num_filter=80, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv4')
-    print("conv4 output: ", conv_4.infer_shape(data=X_shape)[1][0])
-    conv_5 = conv(conv_4, num_filter=192, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv5')
-    print("conv5 output: ", conv_5.infer_shape(data=X_shape)[1][0])
-    conv_6 = conv(conv_5, num_filter=288, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv6')
-    print("conv6 output: ", conv_6.infer_shape(data=X_shape)[1][0])
+    # conv1 = conv(embedded_data, num_filter=32, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv1')
+    # print("conv1 output: ", conv1.infer_shape(data=X_shape)[1][0])
+    # conv2 = conv(conv1, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv2')
+    # print("conv2 output: ", conv2.infer_shape(data=X_shape)[1][0])
+    # conv_3 = conv(conv2, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv3')
+    # print("conv3 output: ", conv_3.infer_shape(data=X_shape)[1][0])
+    # pool_1 = mx.sym.Pooling(conv_3, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='pool')
+    # print("poool1 output: ", pool_1.infer_shape(data=X_shape)[1][0])
+    # conv_4 = conv(pool_1, num_filter=80, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv4')
+    # print("conv4 output: ", conv_4.infer_shape(data=X_shape)[1][0])
+    # conv_5 = conv(conv_4, num_filter=192, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv5')
+    # print("conv5 output: ", conv_5.infer_shape(data=X_shape)[1][0])
+    # conv_6 = conv(conv_5, num_filter=288, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv6')
+    # print("conv6 output: ", conv_6.infer_shape(data=X_shape)[1][0])
 
     # Inception blocks
     for i, (blocks, channels) in enumerate(zip(args.blocks, args.channels)):
         for block in list(range(blocks)):
             if i == 0 and block == 0:
-                inception = inception_block_5(conv_6,
+                inception = inception_block_5(embedded_data,
                                           filters=channels,
                                           name='inception_block_5_' + str(i) + str(block) + str(channels))
-            elif block == 0:
+            elif block == blocks-1 and i != len(args.blocks)-1:
                 inception = inception_block_5(inception,
                                               filters=channels,
                                               name='inception_block_5_' + str(i) + str(block) + str(channels),
@@ -318,11 +352,13 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
             print("Block {} inception module {} output shape: {}".format(i+1, block+1, inception.infer_shape(data=X_shape)[1][0]))
 
 
-    avg_pool = mx.sym.Pooling(inception, kernel=(1, 2), stride=(1, 1), pad=(0, 0), pool_type='avg')
+    avg_pool = mx.sym.Pooling(inception, kernel=(4, 4), stride=(1, 1), pad=(0, 0), pool_type='avg')
     print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
 
-    output = mx.sym.FullyConnected(avg_pool, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
-    sm = mx.sym.SoftmaxOutput(output, softmax_label)
+    dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.fc_dropout)
+
+    output = mx.sym.FullyConnected(dropout, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
+    sm = mx.sym.SoftmaxOutput(output, softmax_label, smooth_alpha=args.smooth_alpha)
     print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
 
     return sm
@@ -371,11 +407,14 @@ if __name__ == '__main__':
     # Setup dirs
     os.mkdir(args.output_dir) if not os.path.exists(args.output_dir) else None
 
-    # Read training data into pandas data frames
+    # Read training data into pandas data frames and sample if desired
     train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
     test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
+    fn = lambda obj: obj.loc[np.random.choice(obj.index, args.max_train_utt_per_intent, False), :]
+    train_df = train_df.groupby('intent', as_index=False).apply(fn)
     summarize_data(train_df, 'Training data')
     summarize_data(test_df, 'Test data')
+
 
     # Define vocab (if unknown characters are encountered they are replaced with final value in alphabet)
     alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'
@@ -386,7 +425,7 @@ if __name__ == '__main__':
                                                      alphabet=char_to_index)
 
     # Build network graph
-    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)
+    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels)
 
     # Train the model
     trained_module = train(symbol, train_iter, val_iter)

@@ -40,72 +40,40 @@ parser.add_argument('--output-dir', type=str, default='checkpoint',
                     help='directory to save model params/symbol to')
 parser.add_argument('--gpus', type=str, default='',
                     help='list of gpus to run, e.g. 0 or 0,2,5. empty means using cpu.')
+
 parser.add_argument('--num-epochs', type=int, default=256,
                     help='how  many times to update the model parameters')
-parser.add_argument('--batch-size', type=int, default=512,
+parser.add_argument('--batch-size', type=int, default=128,
                     help='the number of training records in each minibatch')
-parser.add_argument('--sequence-length', type=int, default=1024,
+parser.add_argument('--sequence-length', type=int, default=299,
                     help='the number of characters in each training example')
-parser.add_argument('--fc-size', type=int, default=2048,
-                    help='the number of hidden units in each fully connected layer')
-parser.add_argument('--optimizer', type=str, default='SGD',
+
+# Optimizer
+parser.add_argument('--optimizer', type=str, default='RMSProp',
                     help='optimization algorithm to update model parameters with')
-parser.add_argument('--lr', type=float, default=0.01,
+parser.add_argument('--decay', type=float, default=0.9,
+                    help='decay factor for moving average')
+parser.add_argument('--epsilon', type=float, default=1.0,
+                    help='avoids division by 0')
+parser.add_argument('--lr', type=float, default=0.045,
                     help='learning rate for chosen optimizer')
+parser.add_argument('--grad-clip', type=float, default=2.0,
+                    help='Clips weights to +- this value')
+
+# Regularization
 parser.add_argument('--l2', type=float, default=0.0,
                     help='l2 regularization coefficient')
-parser.add_argument('--fc-dropout', type=float, default=0.0,
-                    help='dropout regularization probability for hidden units')
-parser.add_argument('--blocks', type=str, default='2,2,2,2',
+parser.add_argument('--dropout', type=float, default=0.0,
+                    help='dropout regularization probability for penultimate layer')
+parser.add_argument('--smooth-alpha', type=float, default=0.0,
+                    help='label smoothing coefficient')
+
+# Architecture
+parser.add_argument('--blocks', type=str, default='3,5,2',
                     help='Number of conv blocks in each component of the network')
-parser.add_argument('--channels', type=str, default='64,128,256,512',
+parser.add_argument('--channels', type=str, default='384,640,2048',
                     help='Number of channels in each conv block')
 
-
-class k_max_pool(mx.operator.CustomOp):
-  def __init__(self, k):
-    super(k_max_pool, self).__init__()
-    self.k = int(k)
-  def forward(self, is_train, req, in_data, out_data, aux):
-    x = in_data[0].asnumpy()
-    assert(4 == len(x.shape))
-    ind = np.argsort(x, axis = 2)
-    sorted_ind = np.sort(ind[:,:,-(self.k):,:], axis = 2)
-    dim0, dim1, dim2, dim3 = sorted_ind.shape
-    self.indices_dim0 = np.arange(dim0).repeat(dim1 * dim2 * dim3)
-    self.indices_dim1 = np.transpose(np.arange(dim1).repeat(dim2 * dim3).reshape((dim1*dim2*dim3, 1)).repeat(dim0, axis=1)).flatten()
-    self.indices_dim2 = sorted_ind.flatten()
-    self.indices_dim3 = np.transpose(np.arange(dim3).repeat(dim2).reshape((dim3, dim2)).repeat(dim0 * dim1, axis = 1)).flatten()
-    y = x[self.indices_dim0, self.indices_dim1, self.indices_dim2, self.indices_dim3].reshape(sorted_ind.shape)
-    self.assign(out_data[0], req[0], mx.nd.array(y))
-
-  def backward(self, req, out_grad, in_data, out_data, in_grad, aux):
-    x = out_grad[0].asnumpy()
-    y = in_data[0].asnumpy()
-    assert(4 == len(x.shape))
-    assert(4 == len(y.shape))
-    y[:,:,:,:] = 0
-    y[self.indices_dim0, self.indices_dim1, self.indices_dim2, self.indices_dim3] \
-      = x.reshape([x.shape[0] * x.shape[1] * x.shape[2] * x.shape[3],])
-    self.assign(in_grad[0], req[0], mx.nd.array(y))
-
-@mx.operator.register("k_max_pool")
-class k_max_poolProp(mx.operator.CustomOpProp):
-  def __init__(self, k):
-    self.k = int(k)
-    super(k_max_poolProp, self).__init__(True)
-  def list_argument(self):
-    return ['data']
-  def list_outputs(self):
-    return ['output']
-  def infer_shape(self, in_shape):
-    data_shape = in_shape[0]
-    assert(len(data_shape) == 4)
-    out_shape = (data_shape[0], data_shape[1], self.k, data_shape[3])
-    return [data_shape], [out_shape]
-
-  def create_operator(self, ctx, shapes, dtypes):
-    return k_max_pool(self.k)
 
 class UtterancePreprocessor:
     """
@@ -220,7 +188,7 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     return preprocessor, train_iter, test_iter
 
 
-def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
+def build_symbol(iterator, preprocessor, blocks, channels):
     """
     :return:  MXNet symbol object
     """
@@ -242,7 +210,7 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
 
         reduce_3 = conv(data, num_filter=3*x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X3_reduce' + str(name))
         if reduce_grid:
-            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X3_conv' + str(name))
+            conv_3 = conv(reduce_3, num_filter=5*x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X3_conv' + str(name))
         else:
             conv_3 = conv(reduce_3, num_filter=4*x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X3_conv' + str(name))
         # print("\t1X3 conv output: ", conv_3.infer_shape(data=X_shape)[1][0])
@@ -250,16 +218,17 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
         reduce_5 = conv(data, num_filter=int(x/2), kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X5_reduce' + str(name))
         conv_5_0 = conv(reduce_5, num_filter=x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X5_conv1' + str(name))
         if reduce_grid:
-            conv_5 = conv(conv_5_0, num_filter=x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X5_conv2' + str(name))
+            conv_5 = conv(conv_5_0, num_filter=3*x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X5_conv2' + str(name))
         else:
             conv_5 = conv(conv_5_0, num_filter=x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X5_conv2' + str(name))
         # print("\t1X5 conv output: ", conv_5.infer_shape(data=X_shape)[1][0])
 
         if reduce_grid:
             pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='1X3_pool')
+            conv_pool = conv(pool, num_filter=filters, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
         else:
             pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='max', name='1X3_pool')
-        conv_pool = conv(pool, num_filter=x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
+            conv_pool = conv(pool, num_filter=x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
         # print("\t1X1 pool output: ", conv_pool.infer_shape(data=X_shape)[1][0])
 
         # concatenate channels
@@ -305,7 +274,7 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
                 inception = inception_block_5(conv_6,
                                           filters=channels,
                                           name='inception_block_5_' + str(i) + str(block) + str(channels))
-            elif block == 0:
+            elif block == len(range(blocks))-1 and i != len(args.blocks)-1:
                 inception = inception_block_5(inception,
                                               filters=channels,
                                               name='inception_block_5_' + str(i) + str(block) + str(channels),
@@ -318,11 +287,13 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
             print("Block {} inception module {} output shape: {}".format(i+1, block+1, inception.infer_shape(data=X_shape)[1][0]))
 
 
-    avg_pool = mx.sym.Pooling(inception, kernel=(1, 2), stride=(1, 1), pad=(0, 0), pool_type='avg')
+    avg_pool = mx.sym.Pooling(inception, kernel=(1, 8), stride=(1, 1), pad=(0, 0), pool_type='avg')
     print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
 
-    output = mx.sym.FullyConnected(avg_pool, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
-    sm = mx.sym.SoftmaxOutput(output, softmax_label)
+    final_dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.dropout)
+
+    output = mx.sym.FullyConnected(final_dropout, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
+    sm = mx.sym.SoftmaxOutput(output, softmax_label, args.smooth_alpha)
     print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
 
     return sm
@@ -341,7 +312,8 @@ def train(symbol, train_iter, val_iter):
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},#, 'momentum': 0.9},
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'gamma1': args.decay, 'epsilon': args.epsilon,
+                                 'clip_weights': args.grad_clip},
                initializer=mx.initializer.Normal(),
                num_epoch=args.num_epochs)
     return module
@@ -386,7 +358,7 @@ if __name__ == '__main__':
                                                      alphabet=char_to_index)
 
     # Build network graph
-    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)
+    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels)
 
     # Train the model
     trained_module = train(symbol, train_iter, val_iter)

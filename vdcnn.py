@@ -287,7 +287,7 @@ def build_symbol(iterator, preprocessor, blocks, channels):
             print("Block {} inception module {} output shape: {}".format(i+1, block+1, inception.infer_shape(data=X_shape)[1][0]))
 
 
-    avg_pool = mx.sym.Pooling(inception, kernel=(1, 8), stride=(1, 1), pad=(0, 0), pool_type='avg')
+    avg_pool = mx.sym.Pooling(inception, kernel=(1, 2), stride=(1, 1), pad=(0, 0), pool_type='avg')
     print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
 
     final_dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.dropout)
@@ -310,13 +310,15 @@ def train(symbol, train_iter, val_iter):
     module = mx.mod.Module(symbol, context=devs)
     module.fit(train_data=train_iter,
                eval_data=val_iter,
-               optimizer=args.optimizer,
+               optimizer='Adam',
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'gamma1': args.decay, 'epsilon': args.epsilon,
-                                 'clip_weights': args.grad_clip},
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},
                initializer=mx.initializer.Normal(),
                num_epoch=args.num_epochs)
     return module
+
+# optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'gamma1': args.decay, 'epsilon': args.epsilon,
+#                                  'clip_weights': args.grad_clip}
 
 
 def summarize_data(df, name):

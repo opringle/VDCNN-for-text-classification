@@ -78,7 +78,7 @@ parser.add_argument('--smooth-alpha', type=float, default=0.0,
 parser.add_argument('--char-embed', type=int, default=16,
                     help='character vector embedding size')
 parser.add_argument('--blocks', type=str, default='4, 7, 3',
-                    help='Number of conv blocks in each component of the network')
+                    help='Number of each constant grid size inception block')
 
 
 class UtterancePreprocessor:

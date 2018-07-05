@@ -45,12 +45,30 @@ parser.add_argument('--num-epochs', type=int, default=256,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=512,
                     help='the number of training records in each minibatch')
+
 parser.add_argument('--max-words', type=int, default=20,
                     help='the number of words in each utterance')
 parser.add_argument('--max-word-length', type=int, default=20,
                     help='the number of characters in each word')
-parser.add_argument('--fc-size', type=int, default=2048,
-                    help='the number of hidden units in each fully connected layer')
+
+parser.add_argument('--embed-size', type=int, default=26,
+                    help='character embeddding size')
+parser.add_argument('--embed-dropout', type=float, default=0.5,
+                    help='dropout rate for char embeddings')
+parser.add_argument('--rnn-size', type=int, default=22,
+                    help='size of each rnn hidden state')
+parser.add_argument('--rnn-dropout', type=float, default=0.2,
+                    help='dropout rate for rnn hidden states')
+parser.add_argument('--cnn-filter-size', type=int, default=3,
+                    help='height/width of cnn filters')
+parser.add_argument('--filters', type=int, default=100,
+                    help='number of cnn filters')
+parser.add_argument('--pool-filter-size', type=int, default=2,
+                    help='height/width of pooling filters')
+parser.add_argument('--penultimate-dropout', type=float, default=0.4,
+                    help='dropout rate for penultimate layer')
+
+
 parser.add_argument('--optimizer', type=str, default='SGD',
                     help='optimization algorithm to update model parameters with')
 parser.add_argument('--lr', type=float, default=0.01,
@@ -59,60 +77,9 @@ parser.add_argument('--l2', type=float, default=0.0,
                     help='l2 regularization coefficient')
 parser.add_argument('--smooth-alpha', type=float, default=0.0,
                     help='label smoothing coefficient')
-parser.add_argument('--fc-dropout', type=float, default=0.0,
-                    help='dropout regularization probability for hidden units')
-parser.add_argument('--blocks', type=str, default='3,5,2',
-                    help='Number of conv blocks in each component of the network')
-parser.add_argument('--channels', type=str, default='64,128,256',
-                    help='Number of channels in each conv block')
-parser.add_argument('--max-train-utt-per-intent', type=int, default=512,
+parser.add_argument('--max-train-utt-per-intent', type=int, default=None,
                     help='the number of training records in each minibatch')
 
-
-class k_max_pool(mx.operator.CustomOp):
-  def __init__(self, k):
-    super(k_max_pool, self).__init__()
-    self.k = int(k)
-  def forward(self, is_train, req, in_data, out_data, aux):
-    x = in_data[0].asnumpy()
-    assert(4 == len(x.shape))
-    ind = np.argsort(x, axis = 2)
-    sorted_ind = np.sort(ind[:,:,-(self.k):,:], axis = 2)
-    dim0, dim1, dim2, dim3 = sorted_ind.shape
-    self.indices_dim0 = np.arange(dim0).repeat(dim1 * dim2 * dim3)
-    self.indices_dim1 = np.transpose(np.arange(dim1).repeat(dim2 * dim3).reshape((dim1*dim2*dim3, 1)).repeat(dim0, axis=1)).flatten()
-    self.indices_dim2 = sorted_ind.flatten()
-    self.indices_dim3 = np.transpose(np.arange(dim3).repeat(dim2).reshape((dim3, dim2)).repeat(dim0 * dim1, axis = 1)).flatten()
-    y = x[self.indices_dim0, self.indices_dim1, self.indices_dim2, self.indices_dim3].reshape(sorted_ind.shape)
-    self.assign(out_data[0], req[0], mx.nd.array(y))
-
-  def backward(self, req, out_grad, in_data, out_data, in_grad, aux):
-    x = out_grad[0].asnumpy()
-    y = in_data[0].asnumpy()
-    assert(4 == len(x.shape))
-    assert(4 == len(y.shape))
-    y[:,:,:,:] = 0
-    y[self.indices_dim0, self.indices_dim1, self.indices_dim2, self.indices_dim3] \
-      = x.reshape([x.shape[0] * x.shape[1] * x.shape[2] * x.shape[3],])
-    self.assign(in_grad[0], req[0], mx.nd.array(y))
-
-@mx.operator.register("k_max_pool")
-class k_max_poolProp(mx.operator.CustomOpProp):
-  def __init__(self, k):
-    self.k = int(k)
-    super(k_max_poolProp, self).__init__(True)
-  def list_argument(self):
-    return ['data']
-  def list_outputs(self):
-    return ['output']
-  def infer_shape(self, in_shape):
-    data_shape = in_shape[0]
-    assert(len(data_shape) == 4)
-    out_shape = (data_shape[0], data_shape[1], self.k, data_shape[3])
-    return [data_shape], [out_shape]
-
-  def create_operator(self, ctx, shapes, dtypes):
-    return k_max_pool(self.k)
 
 class UtterancePreprocessor:
     """
@@ -254,56 +221,11 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     return preprocessor, train_iter, test_iter
 
 
-def build_symbol(iterator, preprocessor, blocks, channels):
+def build_symbol(iterator, preprocessor, embed_dropout, rnn_hidden_units, rnn_dropout, cnn_filter_size, cnn_filters,
+                 pool_filter, penultimate_dropout):
     """
     :return:  MXNet symbol object
     """
-    def conv(data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
-        conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
-                                  name='%s%s_conv2d' % (name, suffix))
-        bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
-        act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
-        return act
-
-    def inception_block_5(data, filters, name, reduce_grid=False):
-        """
-        inception module with dimensionality reduction
-        """
-        x = int(filters/8)
-
-        conv_1 = conv(data, num_filter=2 * x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_conv' + str(name))
-        # print("\t1X1 conv output: ", conv_1.infer_shape(data=X_shape)[1][0])
-
-        reduce_3 = conv(data, num_filter=3*x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X3_reduce' + str(name))
-        if reduce_grid:
-            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(3, 3), stride=(2, 2), pad=(0, 0), name='1X3_conv' + str(name))
-        else:
-            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(3, 3), stride=(1, 1), pad=(1, 1), name='1X3_conv' + str(name))
-        # print("\t1X3 conv output: ", conv_3.infer_shape(data=X_shape)[1][0])
-
-        reduce_5 = conv(data, num_filter=int(x/2), kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X5_reduce' + str(name))
-        conv_5_0 = conv(reduce_5, num_filter=x, kernel=(3, 3), stride=(1, 1), pad=(1, 1), name='1X5_conv1' + str(name))
-        if reduce_grid:
-            conv_5 = conv(conv_5_0, num_filter=4*x, kernel=(3, 3), stride=(2, 2), pad=(0, 0), name='1X5_conv2' + str(name))
-        else:
-            conv_5 = conv(conv_5_0, num_filter=x, kernel=(3, 3), stride=(1, 1), pad=(1, 1), name='1X5_conv2' + str(name))
-        # print("\t1X5 conv output: ", conv_5.infer_shape(data=X_shape)[1][0])
-
-        if reduce_grid:
-            pool = mx.sym.Pooling(data, kernel=(3, 3), stride=(2, 2), pad=(0, 0), pool_type='max', name='1X3_pool')
-        else:
-            pool = mx.sym.Pooling(data, kernel=(3, 3), stride=(1, 1), pad=(1, 1), pool_type='max', name='1X3_pool')
-            conv_pool = conv(pool, num_filter=x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
-        # print("\t1X1 pool output: ", conv_pool.infer_shape(data=X_shape)[1][0])
-
-        # concatenate channels
-        if reduce_grid:
-            concat = mx.sym.Concat(*[conv_3, conv_5, pool], dim=1, name=str(name))
-        else:
-            concat = mx.sym.Concat(*[conv_1, conv_3, conv_5, conv_pool], dim=1, name=str(name))
-        # print("\tdepth concat output: ", concat.infer_shape(data=X_shape)[1][0])
-        return concat
-
     X_shape, Y_shape = iterator.provide_data[0][1], iterator.provide_label[0][1]
 
     data = mx.sym.Variable(name="data")
@@ -312,55 +234,44 @@ def build_symbol(iterator, preprocessor, blocks, channels):
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
     # Embed each character to 16 channels
-    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=16)
-    embedded_data = mx.sym.transpose(embedded_data, axes=(0, 3, 1, 2))
+    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=args.embed_size)
+    embedded_data = mx.sym.transpose(embedded_data, axes=(0, 1, 2, 3))
+    embedded_data = mx.sym.Dropout(embedded_data, p=embed_dropout, name='embed_dropout')
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
-    # Initial conv layers
-    # conv1 = conv(embedded_data, num_filter=32, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv1')
-    # print("conv1 output: ", conv1.infer_shape(data=X_shape)[1][0])
-    # conv2 = conv(conv1, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv2')
-    # print("conv2 output: ", conv2.infer_shape(data=X_shape)[1][0])
-    # conv_3 = conv(conv2, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv3')
-    # print("conv3 output: ", conv_3.infer_shape(data=X_shape)[1][0])
-    # pool_1 = mx.sym.Pooling(conv_3, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='pool')
-    # print("poool1 output: ", pool_1.infer_shape(data=X_shape)[1][0])
-    # conv_4 = conv(pool_1, num_filter=80, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv4')
-    # print("conv4 output: ", conv_4.infer_shape(data=X_shape)[1][0])
-    # conv_5 = conv(conv_4, num_filter=192, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv5')
-    # print("conv5 output: ", conv_5.infer_shape(data=X_shape)[1][0])
-    # conv_6 = conv(conv_5, num_filter=288, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv6')
-    # print("conv6 output: ", conv_6.infer_shape(data=X_shape)[1][0])
+    # bidirectional lstm layer
+    stacked_rnn_cells = mx.rnn.SequentialRNNCell()
+    stacked_rnn_cells.add(mx.rnn.LSTMCell(num_hidden=rnn_hidden_units))
+    stacked_rnn_cells.add(mx.rnn.DropoutCell(rnn_dropout))
+    output, states = stacked_rnn_cells.unroll(length=args.max_words, inputs=embedded_data, merge_outputs=True)
+    print("lstm output shape: {}".format(output.infer_shape(data=X_shape)[1][0]))
 
-    # Inception blocks
-    for i, (blocks, channels) in enumerate(zip(args.blocks, args.channels)):
-        for block in list(range(blocks)):
-            if i == 0 and block == 0:
-                inception = inception_block_5(embedded_data,
-                                          filters=channels,
-                                          name='inception_block_5_' + str(i) + str(block) + str(channels))
-            elif block == blocks-1 and i != len(args.blocks)-1:
-                inception = inception_block_5(inception,
-                                              filters=channels,
-                                              name='inception_block_5_' + str(i) + str(block) + str(channels),
-                                              reduce_grid=True)
-            else:
-                inception = inception_block_5(inception,
-                                              filters=channels,
-                                              name='inception_block_5_' + str(i) + str(block) + str(channels))
+    cnn_input = mx.sym.Reshape(output, shape=(0, 1, args.max_words, -1), name='cnn_input')
+    print("cnn input shape: {}".format(cnn_input.infer_shape(data=X_shape)[1][0]))
 
-            print("Block {} inception module {} output shape: {}".format(i+1, block+1, inception.infer_shape(data=X_shape)[1][0]))
+    # 2d convolutions
+    convi = mx.sym.Convolution(data=cnn_input, kernel=(cnn_filter_size, cnn_filter_size), num_filter=cnn_filters, name="convi")
+    relui = mx.sym.Activation(data=convi, act_type='relu', name="acti")
+    print("cnn output shape: {}".format(relui.infer_shape(data=X_shape)[1][0]))
 
+    # 2d pooling
+    pooli = mx.sym.Pooling(data=relui, pool_type='max',
+                           kernel=(pool_filter, pool_filter),
+                           stride=(pool_filter, pool_filter),
+                           pad=(0, 0),
+                           name="pooli")
+    print("pooling output shape: {}".format(pooli.infer_shape(data=X_shape)[1][0]))
 
-    avg_pool = mx.sym.Pooling(inception, kernel=(4, 4), stride=(1, 1), pad=(0, 0), pool_type='avg')
-    print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
+    # flatten and dropout
+    penultimate = mx.sym.Dropout(mx.sym.flatten(pooli), p=penultimate_dropout, name='penultimate')
+    print("penultimate output shape: {}".format(penultimate.infer_shape(data=X_shape)[1][0]))
 
-    dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.fc_dropout)
+    # Pass to fully connected layer to map to neuron per class
+    fc = mx.sym.FullyConnected(data=penultimate, num_hidden=len(preprocessor.label_to_index), name='output_')
+    print("output shape: {}".format(fc.infer_shape(data=X_shape)[1][0]))
 
-    output = mx.sym.FullyConnected(dropout, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
-    sm = mx.sym.SoftmaxOutput(output, softmax_label, smooth_alpha=args.smooth_alpha)
-    print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
-
+    # Softmax output
+    sm = mx.sym.SoftmaxOutput(data=fc, label=softmax_label, name='softmax')
     return sm
 
 
@@ -377,7 +288,7 @@ def train(symbol, train_iter, val_iter):
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},#, 'momentum': 0.9},
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},
                initializer=mx.initializer.Normal(),
                num_epoch=args.num_epochs)
     return module
@@ -396,13 +307,8 @@ def summarize_data(df, name):
 
 
 if __name__ == '__main__':
-
-    # os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'
-
     # Parse args
     args = parser.parse_args()
-    args.blocks = ast.literal_eval(args.blocks)
-    args.channels = ast.literal_eval(args.channels)
 
     # Setup dirs
     os.mkdir(args.output_dir) if not os.path.exists(args.output_dir) else None
@@ -410,11 +316,8 @@ if __name__ == '__main__':
     # Read training data into pandas data frames and sample if desired
     train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
     test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
-    fn = lambda obj: obj.loc[np.random.choice(obj.index, args.max_train_utt_per_intent, False), :]
-    train_df = train_df.groupby('intent', as_index=False).apply(fn)
     summarize_data(train_df, 'Training data')
     summarize_data(test_df, 'Test data')
-
 
     # Define vocab (if unknown characters are encountered they are replaced with final value in alphabet)
     alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'
@@ -424,8 +327,11 @@ if __name__ == '__main__':
     preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent',
                                                      alphabet=char_to_index)
 
+    print(preprocessor.transform_utterance("I want to log in"))
+
     # Build network graph
-    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels)
+    symbol = build_symbol(train_iter, preprocessor, args.embed_dropout, args.rnn_size, args.rnn_dropout,
+                          args.cnn_filter_size, args.filters, args.pool_filter_size, args.penultimate_dropout)
 
     # Train the model
     trained_module = train(symbol, train_iter, val_iter)

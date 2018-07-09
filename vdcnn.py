@@ -34,36 +34,44 @@ logging.basicConfig(level=logging.DEBUG)
 
 parser = argparse.ArgumentParser(description="Neural Collaborative Filtering Model",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--data', nargs='?', default='./data',
+parser.add_argument('--data', nargs='?', default='./data/atb_model_41/',
                         help='Input data folder')
 parser.add_argument('--output-dir', type=str, default='checkpoint',
                     help='directory to save model params/symbol to')
 parser.add_argument('--gpus', type=str, default='',
                     help='list of gpus to run, e.g. 0 or 0,2,5. empty means using cpu.')
+
 parser.add_argument('--num-epochs', type=int, default=256,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=512,
                     help='the number of training records in each minibatch')
 parser.add_argument('--sequence-length', type=int, default=1024,
                     help='the number of characters in each training example')
+
 parser.add_argument('--fc-size', type=int, default=2048,
                     help='the number of hidden units in each fully connected layer')
-parser.add_argument('--optimizer', type=str, default='SGD',
-                    help='optimization algorithm to update model parameters with')
-parser.add_argument('--lr', type=float, default=0.01,
-                    help='learning rate for chosen optimizer')
-parser.add_argument('--l2', type=float, default=0.0,
-                    help='l2 regularization coefficient')
 parser.add_argument('--fc-dropout', type=float, default=0.0,
                     help='dropout regularization probability for hidden units')
-parser.add_argument('--blocks', type=str, default='2,2,2,2',
+
+parser.add_argument('--blocks', type=str, default='1,1,1,1',
                     help='Number of conv blocks in each component of the network')
-parser.add_argument('--channels', type=str, default='64,128,256,512',
+parser.add_argument('--channels', type=str, default='6,6,6,8',
                     help='Number of channels in each conv block')
 parser.add_argument('--final-pool', action='store_true',
                     help='Apply 8 max pooling at the final layer')
-parser.add_argument('--shortcuts', action='store_true',
-                    help='Whether to apply resnet style shortcuts')
+
+parser.add_argument('--optimizer', type=str, default='SGD',
+                    help='optimization algorithm to update model parameters with')
+parser.add_argument('--lr', type=float, default=1.0,
+                    help='learning rate for chosen optimizer')
+parser.add_argument('--momentum', type=float, default=0.95,
+                    help='momentum for chosen optimizer')
+parser.add_argument('--lr-reduce-factor', type=float, default=0.5,
+                    help='multiply learning rate by this number when modifying')
+parser.add_argument('--lr-reduce-epoch', type=int, default=10000,
+                    help='modify learning rate every n epochs')
+parser.add_argument('--l2', type=float, default=0.0,
+                    help='l2 regularization coefficient')
 
 
 class k_max_pool(mx.operator.CustomOp):
@@ -93,6 +101,7 @@ class k_max_pool(mx.operator.CustomOp):
       = x.reshape([x.shape[0] * x.shape[1] * x.shape[2] * x.shape[3],])
     self.assign(in_grad[0], req[0], mx.nd.array(y))
 
+
 @mx.operator.register("k_max_pool")
 class k_max_poolProp(mx.operator.CustomOpProp):
   def __init__(self, k):
@@ -110,6 +119,7 @@ class k_max_poolProp(mx.operator.CustomOpProp):
 
   def create_operator(self, ctx, shapes, dtypes):
     return k_max_pool(self.k)
+
 
 class UtterancePreprocessor:
     """
@@ -224,52 +234,21 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     return preprocessor, train_iter, test_iter
 
 
-def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
+def build_symbol(iterator, preprocessor, blocks, channels):
     """
     :return:  MXNet symbol object
     """
+    def conv(data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
+        conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
+                                  name='%s%s_conv2d' % (name, suffix))
+        bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
+        act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
+        return act
 
-    def conv_block(data, num_filter, name, shortcut_input=None):
-        convi1 = mx.sym.Convolution(data, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv1'+str(name))
-        normi1 = mx.sym.BatchNorm(convi1, axis=0, name='norm1'+str(name))
-        acti1 = mx.sym.Activation(normi1, act_type='relu', name='rel1'+str(name))
-        convi2 = mx.sym.Convolution(acti1, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv2'+str(name))
-        normi2 = mx.sym.BatchNorm(convi2, axis=0, name='norm2'+str(name))
-        if shortcut_input:
-            shortcuti = mx.sym.broadcast_add(lhs=normi2, rhs=shortcut_input)
-            acti2 = mx.sym.Activation(shortcuti, act_type='relu', name='rel2'+str(name))
-        else:
-            acti2 = mx.sym.Activation(normi2, act_type='relu', name='rel2' + str(name))
-        return acti2
-
-    def inception_block(data, reductions, filters, name):
-        """
-        inception module with dimensionality reduction
-        """
-        conv_1 = mx.sym.Convolution(data, kernel=(1, 1), num_filter=filters['1X1'], name='1X1_conv' + str(name))
-        acti_1 = mx.sym.Activation(conv_1, act_type='relu', name='1X1_relu' + str(name))
-        # print("\t1X1 conv output: ", acti_1.infer_shape(data=X_shape)[1][0])
-
-        reduce_3 = mx.sym.Convolution(data, kernel=(1, 1), num_filter=reductions['1X3'], name='1X3_reduce' + str(name))
-        conv_3 = mx.sym.Convolution(reduce_3, kernel=(1, 3), stride=(1, 1), pad=(0, 1), num_filter=filters['1X3'], name='1X3_conv' + str(name))
-        acti_3 = mx.sym.Activation(conv_3, act_type='relu', name='1X3_relu' + str(name))
-        # print("\t1X3 conv output: ", acti_3.infer_shape(data=X_shape)[1][0])
-
-        reduce_5 = mx.sym.Convolution(data, kernel=(1, 1), num_filter=reductions['1X5'], name='1X5_reduce' + str(name))
-        conv_5 = mx.sym.Convolution(reduce_5, kernel=(1, 5), stride=(1, 1), pad=(0, 2), num_filter=filters['1X5'], name='1X5_conv' + str(name))
-        acti_5 = mx.sym.Activation(conv_5, act_type='relu', name='1X5_relu' + str(name))
-        # print("\t1X5 conv output: ", acti_5.infer_shape(data=X_shape)[1][0])
-
-        pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='max', name='1X3_pool')
-        conv_pool = mx.sym.Convolution(pool, kernel=(1, 1), num_filter=filters['pool_proj'], name='1X1_pool_conv' + str(name))
-        acti_pool = mx.sym.Activation(conv_pool, act_type='relu', name='1X1_pool_relu' + str(name))
-        # print("\t1X1 pool output: ", acti_pool.infer_shape(data=X_shape)[1][0])
-
-        # concatenate channels
-        concat = mx.sym.Concat(*[acti_1, acti_3, acti_5,  acti_pool], dim=1, name=str(name))
-        # print("\tdepth concat output: ", concat.infer_shape(data=X_shape)[1][0])
-
-        return concat
+    def conv_block(data, num_filter, name):
+        conv1 = conv(data, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv1'+str(name))
+        conv2 = conv(conv1, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv2'+str(name))
+        return conv2
 
     X_shape, Y_shape = iterator.provide_data[0][1], iterator.provide_label[0][1]
 
@@ -284,29 +263,8 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Temporal Convolutional Layer, each kernel overlaps 3 character vectors per position
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
-    temp_norm_1 = mx.sym.BatchNorm(temp_conv_1, axis=1)
-    temp_act_1 = mx.sym.Activation(temp_norm_1, act_type='relu')
+    temp_conv_1 = conv(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
     print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
-
-    # # Create convolutional blocks with pooling in-between
-    # for i, block_size in enumerate(blocks):
-    #     print("section {} ({} blocks)".format(i, block_size))
-    #     for j in list(range(block_size)):
-    #         if i == 0 and j == 0:
-    #             # first block follows the first temp conv layer
-    #             block = conv_block(temp_act_1, num_filter=channels[i], name='block'+str(i)+'_'+str(j), shortcut_input=None)
-    #         elif j == 0:
-    #             # this block follows a pooling layer
-    #             block = conv_block(pool, num_filter=channels[i], name='block' + str(i) + '_' + str(j))
-    #         else:
-    #             # this block follows a previous block
-    #             block = conv_block(block, num_filter=channels[i], name='block'+str(i)+'_'+str(j), shortcut_input=block)
-    #         print('\tblock'+str(i)+'_'+str(j), block.infer_shape(data=X_shape)[1][0])
-    #     if i != len(blocks)-1:
-    #         # pool after each block size, excluding final layer
-    #         pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
-    #         print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between
     for i, block_size in enumerate(blocks):
@@ -314,30 +272,18 @@ def build_symbol(iterator, preprocessor, blocks, channels, final_pool=False):
         for j in list(range(block_size)):
             if i == 0 and j == 0:
                 # first block follows the first temp conv layer
-                block = inception_block(temp_act_1,
-                                        reductions={'1X3': 96, '1X5': 16},
-                                        filters={'1X1': 64, '1X3': 128, '1X5': 32, 'pool_proj': 32},
-                                        name='block'+str(i)+'_'+str(j))
+                block = conv_block(temp_conv_1, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
             elif j == 0:
                 # this block follows a pooling layer
-                block = inception_block(pool,
-                                        reductions={'1X3': 96, '1X5': 16},
-                                        filters={'1X1': 64, '1X3': 128, '1X5': 32, 'pool_proj': 32},
-                                        name='block'+str(i)+'_'+str(j))
+                block = conv_block(pool, num_filter=channels[i], name='block' + str(i) + '_' + str(j))
             else:
-                # this block follows the previous block
-                block = inception_block(block,
-                                        reductions={'1X3': 96, '1X5': 16},
-                                        filters={'1X1': 64, '1X3': 128, '1X5': 32, 'pool_proj': 32},
-                                        name='block' + str(i) + '_' + str(j))
+                # this block follows a previous block
+                block = conv_block(block, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
             print('\tblock'+str(i)+'_'+str(j), block.infer_shape(data=X_shape)[1][0])
         if i != len(blocks)-1:
             # pool after each block size, excluding final layer
             pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
-
-
-
 
     if args.final_pool:
         block = mx.sym.transpose(mx.symbol.Custom(data=mx.sym.transpose(block, axes=(0, 1, 3, 2)), name='8_max_pool', op_type='k_max_pool', k=8), axes=(0, 1, 3, 2))
@@ -374,13 +320,20 @@ def train(symbol, train_iter, val_iter):
     """
     devs = mx.cpu() if args.gpus is None or args.gpus is '' else [mx.gpu(int(i)) for i in args.gpus.split(',')]
     module = mx.mod.Module(symbol, context=devs)
-    module.fit(train_data=train_iter,
+    module.fit(num_epoch=args.num_epochs,
+               train_data=train_iter,
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},#, 'momentum': 0.9},
-               initializer=mx.initializer.Normal(),
-               num_epoch=args.num_epochs)
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'momentum': args.momentum,
+                                 'lr_scheduler': mx.lr_scheduler.FactorScheduler(step=int((train_df.shape[0] / args.batch_size) * args.lr_reduce_epoch),
+                                                                                 factor=args.lr_reduce_factor,
+                                                                                 stop_factor_lr=1e-08)},
+               initializer=mx.initializer.Mixed(patterns=['conv2d_weight','bias', '.*'],
+                                                initializers=[mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
+                                                              mx.initializer.Zero(),
+                                                              mx.initializer.Normal(sigma=0.02)]),
+               epoch_end_callback=mx.callback.do_checkpoint(prefix=os.path.join(args.output_dir, "checkpoint"), period=1))
     return module
 
 
@@ -423,7 +376,7 @@ if __name__ == '__main__':
                                                      alphabet=char_to_index)
 
     # Build network graph
-    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels, final_pool=args.final_pool)
+    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks, channels=args.channels)
 
     # Train the model
     trained_module = train(symbol, train_iter, val_iter)

@@ -27,6 +27,7 @@ import argparse
 import logging
 import os
 import ast
+import copy
 from random import randint
 
 
@@ -50,15 +51,11 @@ parser.add_argument('--sequence-length', type=int, default=1024,
 
 parser.add_argument('--fc-size', type=int, default=2048,
                     help='the number of hidden units in each fully connected layer')
-parser.add_argument('--fc-dropout', type=float, default=0.0,
-                    help='dropout regularization probability for hidden units')
 
 parser.add_argument('--blocks', type=str, default='1,1,1,1',
                     help='Number of conv blocks in each component of the network')
 parser.add_argument('--channels', type=str, default='6,6,6,8',
                     help='Number of channels in each conv block')
-parser.add_argument('--final-pool', action='store_true',
-                    help='Apply 8 max pooling at the final layer')
 
 parser.add_argument('--optimizer', type=str, default='SGD',
                     help='optimization algorithm to update model parameters with')
@@ -72,6 +69,9 @@ parser.add_argument('--lr-reduce-epoch', type=int, default=10000,
                     help='modify learning rate every n epochs')
 parser.add_argument('--l2', type=float, default=0.0,
                     help='l2 regularization coefficient')
+parser.add_argument('--dropout', type=float, default=0.0,
+                    help='dropout rate for penultimate layer')
+
 
 
 class k_max_pool(mx.operator.CustomOp):
@@ -125,10 +125,11 @@ class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, unknown_char_index, char_to_index=None, pad_char='~'):
+    def __init__(self, length, char_to_index=None, pad_char='👹', unknown_char='👺', space_char='🎃'):
         self.length = length
         self.pad_char = pad_char
-        self.unknown_char_index = unknown_char_index #should this be a random char from the dict?
+        self.unknown_char = unknown_char
+        self.space_char = space_char
         self.padded_data = 0
         self.sliced_data = 0
         self.char_to_index = char_to_index
@@ -170,8 +171,16 @@ class UtterancePreprocessor:
         self.label_to_index = self.build_vocab(labels, depth=1)
 
         if self.pad_char not in self.char_to_index:
-            print("Warning, padded data char: `{}` is not in vocabulary. Adding now.".format(self.pad_char))
             self.char_to_index[self.pad_char] = len(self.char_to_index)
+
+        if self.unknown_char not in self.char_to_index:
+            self.char_to_index[self.unknown_char] = len(self.char_to_index)
+
+        if self.space_char not in self.char_to_index:
+            self.char_to_index[self.space_char] = len(self.char_to_index)
+        print("Space tokens represented as {}\n"
+              "Unknown tokens represented as {}\n"
+              "Padded tokens represented as {}".format(self.space_char, self.unknown_char, self.pad_char))
 
     def transform_utterance(self, utterance):
         """
@@ -180,8 +189,9 @@ class UtterancePreprocessor:
         """
         split_utterance = list(utterance.lower())
         padded_utterance = self.pad_utterance(split_utterance)
-        # indexed_utterance = [self.char_to_index.get(char, randint(0,len(self.char_to_index))) for char in padded_utterance]
-        indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in padded_utterance]
+        resolved_utterance = [self.space_char if char == ' ' else char for char in padded_utterance]
+        resolved_utterance = [self.unknown_char if char not in self.char_to_index else char for char in resolved_utterance]
+        indexed_utterance = [self.char_to_index.get(char) for char in resolved_utterance]
         return indexed_utterance
 
     def transform_label(self, label):
@@ -201,14 +211,8 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, unknown_char_index=len(alphabet),
-                                         char_to_index=alphabet)
+    preprocessor = UtterancePreprocessor(length=args.sequence_length, char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
-
-    print("index of unknown characters = {}\n"
-          "padded characters represented as = {}\n"
-          "index of pad char in dict: {}".format(preprocessor.unknown_char_index, preprocessor.pad_char,
-                                                 alphabet[preprocessor.pad_char]))
 
 
     # Transform data
@@ -262,8 +266,8 @@ def build_symbol(iterator, preprocessor, blocks, channels):
     embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
-    # Temporal Convolutional Layer, each kernel overlaps 3 character vectors per position
-    temp_conv_1 = conv(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
+    # Temporal Convolutional Layer (without activation)
+    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=64, pad=(0, 1))
     print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
 
     # Create convolutional blocks with pooling in-between
@@ -285,26 +289,15 @@ def build_symbol(iterator, preprocessor, blocks, channels):
             pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
-    if args.final_pool:
-        block = mx.sym.transpose(mx.symbol.Custom(data=mx.sym.transpose(block, axes=(0, 1, 3, 2)), name='8_max_pool', op_type='k_max_pool', k=8), axes=(0, 1, 3, 2))
-        print("k max pool output: ", block.infer_shape(data=X_shape)[1][0])
 
-    # Fully connected layers
-    fc1 = mx.sym.FullyConnected(block, num_hidden=args.fc_size, flatten=True, name='fc1')
-    act1 = mx.sym.Activation(fc1, act_type='relu', name='fc1_act')
-    print("fc1 output: ", fc1.infer_shape(data=X_shape)[1][0])
+    #block = mx.sym.transpose(mx.symbol.Custom(data=mx.sym.transpose(block, axes=(0, 1, 3, 2)), name='8_max_pool', op_type='k_max_pool', k=8), axes=(0, 1, 3, 2))
+    n = int(args.sequence_length / (2**(len(args.blocks)-1)))
+    block = mx.sym.flatten(mx.sym.Pooling(block, kernel=(1, n), stride=(1, 1), pad=(0, 0), pool_type='avg'))
+    print("average pool kernel size {0}, stride 1. output: {1}".format(n, block.infer_shape(data=X_shape)[1][0]))
+    block = mx.sym.Dropout(block, p=args.dropout)
+    print("flattened dropout output: ", block.infer_shape(data=X_shape)[1][0])
 
-    if args.fc_dropout != 0:
-        act1 = mx.sym.Dropout(act1, p=args.fc_dropout)
-
-    fc2 = mx.sym.FullyConnected(act1, num_hidden=args.fc_size, flatten=True, name='fc2')
-    act2 = mx.sym.Activation(fc2, act_type='relu', name='fc2_act')
-    print("fc2 output: ", fc2.infer_shape(data=X_shape)[1][0])
-
-    if args.fc_dropout != 0:
-        act2 = mx.sym.Dropout(act2, p=args.fc_dropout)
-
-    output = mx.sym.FullyConnected(act2, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
+    output = mx.sym.FullyConnected(block, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
     sm = mx.sym.SoftmaxOutput(output, softmax_label)
     print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
 
@@ -320,18 +313,18 @@ def train(symbol, train_iter, val_iter):
     """
     devs = mx.cpu() if args.gpus is None or args.gpus is '' else [mx.gpu(int(i)) for i in args.gpus.split(',')]
     module = mx.mod.Module(symbol, context=devs)
+    schedule = mx.lr_scheduler.FactorScheduler(step=int((train_df.shape[0] / args.batch_size) * args.lr_reduce_epoch),
+                                                                                 factor=args.lr_reduce_factor,
+                                                                                 stop_factor_lr=1e-04)
     module.fit(num_epoch=args.num_epochs,
                train_data=train_iter,
                eval_data=val_iter,
                optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
                optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'momentum': args.momentum,
-                                 'lr_scheduler': mx.lr_scheduler.FactorScheduler(step=int((train_df.shape[0] / args.batch_size) * args.lr_reduce_epoch),
-                                                                                 factor=args.lr_reduce_factor,
-                                                                                 stop_factor_lr=1e-08)},
-               initializer=mx.initializer.Mixed(patterns=['conv2d_weight','bias', '.*'],
+                                 'lr_scheduler': schedule},
+               initializer=mx.initializer.Mixed(patterns=['conv2d_weight', '.*'],
                                                 initializers=[mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
-                                                              mx.initializer.Zero(),
                                                               mx.initializer.Normal(sigma=0.02)]),
                epoch_end_callback=mx.callback.do_checkpoint(prefix=os.path.join(args.output_dir, "checkpoint"), period=1))
     return module
@@ -368,7 +361,7 @@ if __name__ == '__main__':
     summarize_data(test_df, 'Test data')
 
     # Define vocab (if unknown characters are encountered they are replaced with final value in alphabet)
-    alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'
+    alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{}'
     char_to_index = {k: v for v, k in enumerate(list(alph))}
 
     # Build data iterators

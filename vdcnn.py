@@ -55,21 +55,23 @@ parser.add_argument('--sequence-length', type=int, default=299,
                     help='the number of characters in each training example')
 
 # Optimizer
-parser.add_argument('--optimizer', type=str, default='RMSProp',
+parser.add_argument('--optimizer', type=str, default='SGD',
                     help='optimization algorithm to update model parameters with')
-parser.add_argument('--decay', type=float, default=0.9,
-                    help='decay factor for moving average')
-parser.add_argument('--epsilon', type=float, default=1.0,
-                    help='avoids division by 0')
-parser.add_argument('--lr', type=float, default=0.045,
+parser.add_argument('--lr', type=float, default=0.01,
                     help='learning rate for chosen optimizer')
-parser.add_argument('--grad-clip', type=float, default=2.0,
+parser.add_argument('--momentum', type=float, default=0.9,
+                    help='momentum for optimizer')
+parser.add_argument('--lr-reduce-factor', type=float, default=0.97,
+                    help='factor to reduce lr by')
+parser.add_argument('--lr-reduce-epoch', type=int, default=3,
+                    help='reduce lr every n epochs')
+parser.add_argument('--grad-clip', type=float, default=0.0,
                     help='Clips weights to +- this value')
 
 # Regularization
 parser.add_argument('--l2', type=float, default=0.0,
                     help='l2 regularization coefficient')
-parser.add_argument('--dropout', type=float, default=0.0,
+parser.add_argument('--dropout', type=float, default=0.2,
                     help='dropout regularization probability for penultimate layer')
 parser.add_argument('--smooth-alpha', type=float, default=0.0,
                     help='label smoothing coefficient')
@@ -77,18 +79,24 @@ parser.add_argument('--smooth-alpha', type=float, default=0.0,
 # Architecture
 parser.add_argument('--char-embed', type=int, default=16,
                     help='character vector embedding size')
-parser.add_argument('--blocks', type=str, default='4, 7, 3',
+parser.add_argument('--blocks', type=str, default='5, 10, 5',
                     help='Number of each constant grid size inception block')
+parser.add_argument('--k', type=int, default=256)
+parser.add_argument('--l', type=int, default=256)
+parser.add_argument('--m', type=int, default=384)
+parser.add_argument('--n', type=int, default=384)
+
 
 
 class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, unknown_char_index, char_to_index=None, pad_char='~'):
+    def __init__(self, length, char_to_index=None, pad_char='👹', unknown_char='👺', space_char='🎃'):
         self.length = length
         self.pad_char = pad_char
-        self.unknown_char_index = unknown_char_index #should this be a random char from the dict?
+        self.unknown_char = unknown_char
+        self.space_char = space_char
         self.padded_data = 0
         self.sliced_data = 0
         self.char_to_index = char_to_index
@@ -130,8 +138,16 @@ class UtterancePreprocessor:
         self.label_to_index = self.build_vocab(labels, depth=1)
 
         if self.pad_char not in self.char_to_index:
-            print("Warning, padded data char: `{}` is not in vocabulary. Adding now.".format(self.pad_char))
             self.char_to_index[self.pad_char] = len(self.char_to_index)
+
+        if self.unknown_char not in self.char_to_index:
+            self.char_to_index[self.unknown_char] = len(self.char_to_index)
+
+        if self.space_char not in self.char_to_index:
+            self.char_to_index[self.space_char] = len(self.char_to_index)
+        print("Space tokens represented as {}\n"
+              "Unknown tokens represented as {}\n"
+              "Padded tokens represented as {}".format(self.space_char, self.unknown_char, self.pad_char))
 
     def transform_utterance(self, utterance):
         """
@@ -140,8 +156,9 @@ class UtterancePreprocessor:
         """
         split_utterance = list(utterance.lower())
         padded_utterance = self.pad_utterance(split_utterance)
-        # indexed_utterance = [self.char_to_index.get(char, randint(0,len(self.char_to_index))) for char in padded_utterance]
-        indexed_utterance = [self.char_to_index.get(char, self.unknown_char_index) for char in padded_utterance]
+        resolved_utterance = [self.space_char if char == ' ' else char for char in padded_utterance]
+        resolved_utterance = [self.unknown_char if char not in self.char_to_index else char for char in resolved_utterance]
+        indexed_utterance = [self.char_to_index.get(char) for char in resolved_utterance]
         return indexed_utterance
 
     def transform_label(self, label):
@@ -161,14 +178,8 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, unknown_char_index=len(alphabet),
-                                         char_to_index=alphabet)
+    preprocessor = UtterancePreprocessor(length=args.sequence_length, char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
-
-    print("index of unknown characters = {}\n"
-          "padded characters represented as = {}\n"
-          "index of pad char in dict: {}".format(preprocessor.unknown_char_index, preprocessor.pad_char,
-                                                 alphabet[preprocessor.pad_char]))
 
 
     # Transform data
@@ -199,7 +210,7 @@ def compute_grid_size(p):
     return size
 
 
-def build_symbol_old(iterator, preprocessor, blocks, channels):
+def build_symbol(iterator, preprocessor, blocks):
     """
     :return:  MXNet symbol object
     """
@@ -210,215 +221,123 @@ def build_symbol_old(iterator, preprocessor, blocks, channels):
         act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
         return act
 
-    def inception_block_5(data, filters, name, reduce_grid=False):
+    def stem(data, name):
         """
-        inception module with dimensionality reduction
+        figure 16 from https://arxiv.org/pdf/1602.07261.pdf
         """
-        x = int(filters/8)
+        conv_1 = conv(data, num_filter=32, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_1' + str(name))
+        conv_2 = conv(conv_1, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv_2' + str(name))
+        conv_3 = conv(conv_2, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_3' + str(name))
+        conv_4 = conv(conv_3, num_filter=96, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_4' + str(name))
+        maxpool = mx.sym.Pooling(conv_3, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='pool_1' + str(name), pool_type='max')
 
-        conv_1 = conv(data, num_filter=2 * x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_conv' + str(name))
-        # print("\t1X1 conv output: ", conv_1.infer_shape(data=X_shape)[1][0])
+        concat_1 = mx.sym.Concat(*[conv_4, maxpool], dim=1, name='concat_1'+str(name))
 
-        reduce_3 = conv(data, num_filter=3*x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X3_reduce' + str(name))
-        if reduce_grid:
-            conv_3 = conv(reduce_3, num_filter=5*x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X3_conv' + str(name))
-        else:
-            conv_3 = conv(reduce_3, num_filter=4*x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X3_conv' + str(name))
-        # print("\t1X3 conv output: ", conv_3.infer_shape(data=X_shape)[1][0])
+        conv_5 = conv(concat_1, num_filter=64, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_5' + str(name))
+        conv_6 = conv(conv_5, num_filter=64, kernel=(1, 7), stride=(1, 1), pad=(0, 3), name='conv_6' + str(name))
+        conv_7 = conv(conv_6, num_filter=64, kernel=(1, 7), stride=(1, 1), pad=(0, 3), name='conv_7' + str(name))
+        conv_8 = conv(conv_7, num_filter=96, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv_8' + str(name))
 
-        reduce_5 = conv(data, num_filter=int(x/2), kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X5_reduce' + str(name))
-        conv_5_0 = conv(reduce_5, num_filter=x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X5_conv1' + str(name))
-        if reduce_grid:
-            conv_5 = conv(conv_5_0, num_filter=3*x, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='1X5_conv2' + str(name))
-        else:
-            conv_5 = conv(conv_5_0, num_filter=x, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='1X5_conv2' + str(name))
-        # print("\t1X5 conv output: ", conv_5.infer_shape(data=X_shape)[1][0])
+        conv_9 = conv(concat_1, num_filter=64, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_9' + str(name))
+        conv_10 = conv(conv_9, num_filter=96, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv_10' + str(name))
 
-        if reduce_grid:
-            pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='1X3_pool')
-            conv_pool = conv(pool, num_filter=filters, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
-        else:
-            pool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='max', name='1X3_pool')
-            conv_pool = conv(pool, num_filter=x, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='1X1_pool_conv' + str(name))
-        # print("\t1X1 pool output: ", conv_pool.infer_shape(data=X_shape)[1][0])
+        concat_2 = mx.sym.Concat(*[conv_8, conv_10], dim=1, name='concat_2' + str(name))
 
-        # concatenate channels
-        if reduce_grid:
-            concat = mx.sym.Concat(*[conv_3, conv_5, conv_pool], dim=1, name=str(name))
-        else:
-            concat = mx.sym.Concat(*[conv_1, conv_3, conv_5, conv_pool], dim=1, name=str(name))
-        # print("\tdepth concat output: ", concat.infer_shape(data=X_shape)[1][0])
-        return concat
+        maxpool = mx.sym.Pooling(concat_2, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='pool_2' + str(name), pool_type='max')
+        conv_11 = conv(concat_2, num_filter=192, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_11' + str(name))
 
-    X_shape, Y_shape = iterator.provide_data[0][1], iterator.provide_label[0][1]
+        concat_3 = mx.sym.Concat(*[maxpool, conv_11], dim=1, name='concat_3' + str(name))
+        return concat_3
 
-    data = mx.sym.Variable(name="data")
-    softmax_label = mx.sym.Variable(name="softmax_label")
-    print("data_input: ", data.infer_shape(data=X_shape)[1][0])
-    print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
-
-    # Embed each character to 16 channels
-    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=args.char_embed)
-    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
-    print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
-
-    # Initial conv layers
-    conv1 = conv(embedded_data, num_filter=32, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv1')
-    print("conv1 output: ", conv1.infer_shape(data=X_shape)[1][0])
-    conv2 = conv(conv1, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv2')
-    print("conv2 output: ", conv2.infer_shape(data=X_shape)[1][0])
-    conv_3 = conv(conv2, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv3')
-    print("conv3 output: ", conv_3.infer_shape(data=X_shape)[1][0])
-    pool_1 = mx.sym.Pooling(conv_3, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='pool')
-    print("poool1 output: ", pool_1.infer_shape(data=X_shape)[1][0])
-    conv_4 = conv(pool_1, num_filter=80, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv4')
-    print("conv4 output: ", conv_4.infer_shape(data=X_shape)[1][0])
-    conv_5 = conv(conv_4, num_filter=192, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv5')
-    print("conv5 output: ", conv_5.infer_shape(data=X_shape)[1][0])
-    conv_6 = conv(conv_5, num_filter=384, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv6')
-    print("conv6 output: ", conv_6.infer_shape(data=X_shape)[1][0])
-
-    # Inception blocks
-    for i, (blocks, channels) in enumerate(zip(args.blocks, args.channels)):
-        for block in list(range(blocks)):
-            if i == 0 and block == 0:
-                inception = inception_block_5(conv_6,
-                                          filters=channels,
-                                          name='inception_block_5_' + str(i) + str(block) + str(channels))
-            elif block == len(range(blocks))-1 and i != len(args.blocks)-1:
-                inception = inception_block_5(inception,
-                                              filters=channels,
-                                              name='inception_block_5_' + str(i) + str(block) + str(channels),
-                                              reduce_grid=True)
-            else:
-                inception = inception_block_5(inception,
-                                              filters=channels,
-                                              name='inception_block_5_' + str(i) + str(block) + str(channels))
-
-            print("Block {} inception module {} output shape: {}".format(i+1, block+1, inception.infer_shape(data=X_shape)[1][0]))
-
-    avg_pool_size = int((((((((((((args.sequence_length - 1) / 2) - 2) - 1) / 2) - 2) - 1) / 2) -1) / 2) - 1) / 2)
-    print("avg pool kernel size: {}".format(avg_pool_size))
-    avg_pool = mx.sym.Pooling(inception, kernel=(1, avg_pool_size), stride=(1, 1), pad=(0, 0), pool_type='avg')
-    print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
-
-    final_dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.dropout)
-
-    output = mx.sym.FullyConnected(final_dropout, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
-    sm = mx.sym.SoftmaxOutput(output, softmax_label, args.smooth_alpha)
-    print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
-
-    return sm
-
-
-def build_symbol(iterator, preprocessor, blocks):
-    """
-    :return:  MXNet symbol object
-    """
-
-    def Conv(data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
-        conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
-                                  name='%s%s_conv2d' % (name, suffix))
-        bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
-        act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
-        return act
-
-    def inception_a(data, name):
+    def inception_res_a(data, name):
         """
-        Figure 4: https://arxiv.org/pdf/1602.07261.pdf
+        figure 16 from https://arxiv.org/pdf/1602.07261.pdf
         """
-        tower_1 = Conv(data, 96, name=('%s_conv' % name))
+        tower_1 = conv(data, num_filter=32, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_1.1' + str(name))
+        tower_1 = conv(tower_1, num_filter=48, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_1.2' + str(name))
+        tower_1 = conv(tower_1, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_1.3' + str(name))
 
-        tower_2 = Conv(data, 64, name=('%s_tower_1' % name), suffix='_1x1conv')
-        tower_2 = Conv(tower_2, 96, kernel=(1, 3), pad=(0, 1), name=('%s_tower_1' % name), suffix='_1x3conv_1')
+        tower_2 = conv(data, num_filter=32, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_2.1' + str(name))
+        tower_2 = conv(tower_2, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_2.2' + str(name))
 
-        tower_3 = Conv(data, 64, name=('%s_tower_2' % name), suffix='_1x1conv')
-        tower_3 = Conv(tower_3, 96, kernel=(1, 3), pad=(0, 1), name=('%s_tower_2' % name), suffix='_1x3conv_1')
-        tower_3 = Conv(tower_3, 96, kernel=(1, 3), pad=(0, 1), name=('%s_tower_2' % name), suffix='_1x3conv_2')
+        tower_3 = conv(data, num_filter=32, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_3.1' + str(name))
 
-        pooling = mx.sym.Pooling(data=data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='avg',
-                                 name=('pool_%s' % (name)))
-        cproj = Conv(pooling, 96, name=('%s_tower_2' % name), suffix='_conv')
+        tower_concat = mx.sym.Concat(*[tower_1, tower_2, tower_3], dim=1, name='concat_1'+str(name))
+        linear_conv = mx.sym.Convolution(tower_concat, num_filter=384, kernel=(1, 1), stride=(1, 1), pad=(0, 0),
+                                         name='linear_conv'+str(name))
 
-        concat = mx.sym.Concat(*[tower_1, tower_2, tower_3, cproj], name='InceptionA_%s' % name)
-        return concat
+        skip = linear_conv + data
+        return mx.sym.Activation(skip, act_type='relu', name='block'+str(name))
 
-    def reduction_a(data, name):
+    def inception_res_b(data, name, filters):
         """
-        Figure 7: https://arxiv.org/pdf/1602.07261.pdf
+        figure 11 from https://arxiv.org/pdf/1602.07261.pdf
         """
-        tower_1 = Conv(data, 384, kernel=(1, 3), pad=(0, 0), stride=(1, 2), name=('%s_tower_1' % name),
-                       suffix='_1x3conv_1')
+        tower_1 = conv(data, num_filter=128, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_1.1' + str(name))
+        tower_1 = conv(tower_1, num_filter=128, kernel=(1, 7), stride=(1, 1), pad=(0, 3), name='conv_1.2' + str(name))
+        tower_1 = conv(tower_1, num_filter=128, kernel=(1, 7), stride=(1, 1), pad=(0, 3), name='conv_1.3' + str(name))
 
-        tower_2 = Conv(data, 192, name=('%s_tower_2' % name), suffix='_1x1conv')
-        tower_2 = Conv(tower_2, 224, kernel=(1, 3), pad=(0, 1), name=('%s_tower_2' % name), suffix='_1x3conv_1')
-        tower_2 = Conv(tower_2, 256, kernel=(1, 3), pad=(0, 0), stride=(1, 2), name=('%s_tower_2' % name),
-                       suffix='_1x3conv_2')
+        tower_2 = conv(data, num_filter=128, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_2.1' + str(name))
 
-        pooling = mx.sym.Pooling(data=data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max',
-                                 name=('pool_%s' % (name)))
+        tower_concat = mx.sym.Concat(*[tower_1, tower_2], dim=1, name='concat_1'+str(name))
+        linear_conv = mx.sym.Convolution(tower_concat, num_filter=filters, kernel=(1, 1), stride=(1, 1), pad=(0, 0),
+                                         name='linear_conv'+str(name))
 
-        concat = mx.sym.Concat(*[tower_1, tower_2, pooling], name='ReductionA_%s' % name)
-        return concat
+        skip = linear_conv + data
+        return mx.sym.Activation(skip, act_type='relu', name='block'+str(name))
 
-    def inception_b(data, name):
+    def inception_res_c(data, name, filters):
         """
-        Figure 5: https://arxiv.org/pdf/1602.07261.pdf
+        figure 13 from https://arxiv.org/pdf/1602.07261.pdf
         """
-        tower_1 = Conv(data, 384, name=('%s_conv' % name))
+        tower_1 = conv(data, num_filter=192, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_1.1' + str(name))
+        tower_1 = conv(tower_1, num_filter=192, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_1.2' + str(name))
+        tower_1 = conv(tower_1, num_filter=192, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_1.3' + str(name))
 
-        tower_2 = Conv(data, 192, name=('%s_tower_1' % name), suffix='_1x1conv')
-        tower_2 = Conv(tower_2, 256, kernel=(1, 7), pad=(0, 3), name=('%s_tower_1' % name), suffix='_1x7conv_1')
+        tower_2 = conv(data, num_filter=192, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_2.1' + str(name))
 
-        tower_3 = Conv(data, 192, name=('%s_tower_2' % name), suffix='_1x1conv')
-        tower_3 = Conv(tower_3, 224, kernel=(1, 7), pad=(0, 3), name=('%s_tower_2' % name), suffix='_1x7conv_1')
-        tower_3 = Conv(tower_3, 256, kernel=(1, 7), pad=(0, 3), name=('%s_tower_2' % name), suffix='_1x7conv_2')
+        tower_concat = mx.sym.Concat(*[tower_1, tower_2], dim=1, name='concat_1'+str(name))
+        linear_conv = mx.sym.Convolution(tower_concat, num_filter=filters, kernel=(1, 1), stride=(1, 1), pad=(0, 0),
+                                         name='linear_conv'+str(name))
 
-        pooling = mx.sym.Pooling(data=data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='avg',
-                                 name=('pool_%s' % (name)))
-        cproj = Conv(pooling, 128, name=('%s_tower_2' % name), suffix='_conv')
+        skip = linear_conv + data
+        return mx.sym.Activation(skip, act_type='relu', name='block'+str(name))
 
-        concat = mx.sym.Concat(*[tower_1, tower_2, tower_3, cproj], name='InceptionA_%s' % name)
-        return concat
+    def reduction_a(data, name, k, l, m, n):
+        """
+        figure 7 from https://arxiv.org/pdf/1602.07261.pdf
+        """
+        tower_1 = conv(data, num_filter=k, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_1.1' + str(name))
+        tower_1 = conv(tower_1, num_filter=l, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_1.2' + str(name))
+        tower_1 = conv(tower_1, num_filter=m, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_1.3' + str(name))
+
+        tower_2 = conv(data, num_filter=n, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_2.1' + str(name))
+
+        maxpool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='pool_3.1' + str(name), pool_type='max')
+
+        tower_concat = mx.sym.Concat(*[tower_1, tower_2, maxpool], dim=1, name='concat_1'+str(name))
+
+        return tower_concat
 
     def reduction_b(data, name):
         """
-        Figure 8: https://arxiv.org/pdf/1602.07261.pdf
+        figure 12 from https://arxiv.org/pdf/1602.07261.pdf
         """
-        tower_1 = Conv(data, 192, name=('%s_tower_1' % name), suffix='_1x1conv')
-        tower_1 = Conv(tower_1, 192, kernel=(1, 3), pad=(0, 0), stride=(1, 2), name=('%s_tower_1' % name),
-                       suffix='_1x3conv_1')
+        tower_1 = conv(data, num_filter=256, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_1.1' + str(name))
+        tower_1 = conv(tower_1, num_filter=288, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv_1.2' + str(name))
+        tower_1 = conv(tower_1, num_filter=320, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_1.3' + str(name))
 
-        tower_2 = Conv(data, 256, name=('%s_tower_2' % name), suffix='_1x1conv')
-        tower_2 = Conv(tower_2, 320, kernel=(1, 7), pad=(0, 3), name=('%s_tower_2' % name), suffix='_1x7conv_1')
-        tower_2 = Conv(tower_2, 320, kernel=(1, 3), pad=(0, 0), stride=(1, 2), name=('%s_tower_2' % name),
-                       suffix='_1x3conv')
+        tower_2 = conv(data, num_filter=256, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_2.1' + str(name))
+        tower_2 = conv(tower_2, num_filter=288, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_2.2' + str(name))
 
-        pooling = mx.sym.Pooling(data=data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max',
-                                 name=('pool_%s' % (name)))
+        tower_3 = conv(data, num_filter=256, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name='conv_3.1' + str(name))
+        tower_3 = conv(tower_3, num_filter=384, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv_3.2' + str(name))
 
-        concat = mx.sym.Concat(*[tower_1, tower_2, pooling], name='ReductionA_%s' % name)
-        return concat
+        maxpool = mx.sym.Pooling(data, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='pool_3.1' + str(name), pool_type='max')
 
-    def inception_c(data, name):
-        """
-        Figure 5: https://arxiv.org/pdf/1602.07261.pdf
-        """
-        tower_1 = Conv(data, 256, name=('%s_conv' % name))
+        tower_concat = mx.sym.Concat(*[tower_1, tower_2, tower_3, maxpool], dim=1, name='concat_1'+str(name))
 
-        tower_2 = Conv(data, 384, name=('%s_tower_1' % name), suffix='_1x1conv')
-        tower_2 = Conv(tower_2, 512, kernel=(1, 3), pad=(0, 1), name=('%s_tower_1' % name), suffix='_1x3conv_1')
-
-        tower_3 = Conv(data, 384, name=('%s_tower_2' % name), suffix='_1x1conv')
-        tower_3 = Conv(tower_3, 512, kernel=(1, 3), pad=(0, 1), name=('%s_tower_2' % name), suffix='_1x3conv_1')
-        tower_3 = Conv(tower_3, 512, kernel=(1, 3), pad=(0, 1), name=('%s_tower_2' % name), suffix='_1x3conv_2')
-
-        pooling = mx.sym.Pooling(data=data, kernel=(1, 3), stride=(1, 1), pad=(0, 1), pool_type='avg',
-                                 name=('pool_%s' % (name)))
-        cproj = Conv(pooling, 256, name=('%s_tower_2' % name), suffix='_conv')
-
-        concat = mx.sym.Concat(*[tower_1, tower_2, tower_3, cproj], name='InceptionA_%s' % name)
-        return concat
+        return tower_concat
 
     X_shape, Y_shape = iterator.provide_data[0][1], iterator.provide_label[0][1]
 
@@ -427,60 +346,50 @@ def build_symbol(iterator, preprocessor, blocks):
     print("data_input: ", data.infer_shape(data=X_shape)[1][0])
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
-    # Embed each character to 16 channels
+    # Embed each character
     embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=args.char_embed)
     embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
     print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
 
     # Initial conv layers
-    conv1 = Conv(embedded_data, num_filter=32, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv1')
-    print("conv1 output: ", conv1.infer_shape(data=X_shape)[1][0])
-    conv2 = Conv(conv1, num_filter=32, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv2')
-    print("conv2 output: ", conv2.infer_shape(data=X_shape)[1][0])
-    conv_3 = Conv(conv2, num_filter=64, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv3')
-    print("conv3 output: ", conv_3.infer_shape(data=X_shape)[1][0])
-    pool_1 = mx.sym.Pooling(conv_3, kernel=(1, 3), stride=(1, 2), pad=(0, 0), pool_type='max', name='pool')
-    print("poool1 output: ", pool_1.infer_shape(data=X_shape)[1][0])
-    conv_4 = Conv(pool_1, num_filter=80, kernel=(1, 3), stride=(1, 1), pad=(0, 0), name='conv4')
-    print("conv4 output: ", conv_4.infer_shape(data=X_shape)[1][0])
-    conv_5 = Conv(conv_4, num_filter=192, kernel=(1, 3), stride=(1, 2), pad=(0, 0), name='conv5')
-    print("conv5 output: ", conv_5.infer_shape(data=X_shape)[1][0])
-    conv_6 = Conv(conv_5, num_filter=288, kernel=(1, 3), stride=(1, 1), pad=(0, 1), name='conv6')
-    print("conv6 output: ", conv_6.infer_shape(data=X_shape)[1][0])
+    stem = stem(embedded_data, 'stem')
+    print("stem output: ", stem.infer_shape(data=X_shape)[1][0])
 
-    # First block
-    for i in range(1, blocks[0] + 1):
-        if i == 1:
-            inception = inception_a(conv_6, name='Inception_A_block_' + str(i))
-        elif i != blocks[0]:
-            inception = inception_a(inception, name='Inception_A_block_' + str(i))
-        elif i == blocks[0]:
-            inception = reduction_a(inception, name='Reduction_A_block_' + str(i))
-        print("\tBlock 1 inception {} output shape: {}".format(i, inception.infer_shape(data=X_shape)[1][0]))
-
-    # Second block
-    for i in range(1, blocks[1] + 1):
-        if i != blocks[1]:
-            inception = inception_b(inception, name='Inception_B_block_' + str(i))
+    # Inception resnet blocks & reduction blocks
+    for i in list(range(blocks[0])):
+        if i == 0:
+            block = inception_res_a(stem, 'inception_block_a_'+str(i))
         else:
-            inception = reduction_b(inception, name='Reduction_B_block_' + str(i))
-        print("\tBlock 2 inception {} output shape: {}".format(i, inception.infer_shape(data=X_shape)[1][0]))
+            block = inception_res_a(block, 'inception_block_a_'+str(i))
+        print("Inception A block {} module output shape: {}".format(i, block.infer_shape(data=X_shape)[1][0]))
 
-    # Third block
-    for i in range(1, blocks[2] + 1):
-        inception = inception_c(inception, name='Inception_C_block_' + str(i))
-        print("\tBlock 3 inception {} output shape: {}".format(i, inception.infer_shape(data=X_shape)[1][0]))
+    reduction_a = reduction_a(block, 'reduction_a', args.k, args.l, args.m, args.n)
+    print("Reduction A output shape: {}".format(reduction_a.infer_shape(data=X_shape)[1][0]))
 
-    avg_pool_size = int((((((((((((args.sequence_length - 1) / 2) - 2) - 1) / 2) - 2) - 1) / 2) - 1) / 2) - 1) / 2)
-    print("avg pool kernel size: {}".format(avg_pool_size))
-    avg_pool = mx.sym.Pooling(inception, kernel=(1, avg_pool_size), stride=(1, 1), pad=(0, 0), pool_type='avg')
+    for i in list(range(blocks[1])):
+        if i == 0:
+            block = inception_res_b(reduction_a, 'inception_block_b_' + str(i), filters=args.m + args.n + 384)
+        else:
+            block = inception_res_b(block, 'inception_block_b_' + str(i), filters=args.m + args.n + 384)
+        print("Inception B block {} module output shape: {}".format(i, block.infer_shape(data=X_shape)[1][0]))
+
+    reduction_b = reduction_b(block, 'reduction_b')
+    print("Reduction B output shape: {}".format(reduction_b.infer_shape(data=X_shape)[1][0]))
+
+    for i in list(range(blocks[2])):
+        if i == 0:
+            block = inception_res_c(reduction_b, 'inception_block_c_' + str(i), filters=2144)
+        else:
+            block = inception_res_c(block, 'inception_block_c_' + str(i), filters=2144)
+        print("Inception C block {} module output shape: {}".format(i, block.infer_shape(data=X_shape)[1][0]))
+
+    avg_pool = mx.sym.Pooling(block, kernel=(1, 8), stride=(1, 1), pad=(0, 0), pool_type='avg', name='avg_pool')
     print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
 
-    final_dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.dropout)
-    print("dropout output: ", final_dropout.infer_shape(data=X_shape)[1][0])
+    dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.dropout, name='dropout')
+    print("dropout output: ", dropout.infer_shape(data=X_shape)[1][0])
 
-    output = mx.sym.FullyConnected(final_dropout, num_hidden=len(preprocessor.label_to_index), flatten=True,
-                                   name='output')
+    output = mx.sym.FullyConnected(dropout, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
     sm = mx.sym.SoftmaxOutput(output, softmax_label, args.smooth_alpha)
     print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
 
@@ -506,22 +415,25 @@ def train(symbol, train_iter, val_iter):
     """
     devs = mx.cpu() if args.gpus is None or args.gpus is '' else [mx.gpu(int(i)) for i in args.gpus.split(',')]
     module = mx.mod.Module(symbol, context=devs)
+    schedule = mx.lr_scheduler.FactorScheduler(step=int((train_df.shape[0] / args.batch_size) * args.lr_reduce_epoch),
+                                               factor=args.lr_reduce_factor,
+                                               stop_factor_lr=1e-04)
+    init = mx.initializer.Mixed(patterns=['conv2d_weight', '.*'],
+                         initializers=[mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
+                                       mx.initializer.Normal(sigma=0.02)])
     if args.load_prefix:
         print("Starting training from previous weights")
         module.load(prefix=args.load_prefix, epoch=int(args.load_epoch))
     module.fit(train_data=train_iter,
                eval_data=val_iter,
-               optimizer='Adam',
+               optimizer=args.optimizer,
                eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2},
-               initializer=mx.initializer.Normal(),
+               optimizer_params={'learning_rate': args.lr, 'wd': args.l2,
+                                 'momentum': args.momentum, 'lr_scheduler': schedule},
+               initializer=init,
                num_epoch=args.num_epochs,
                epoch_end_callback=save_model())
     return module
-
-
-# optimizer_params={'learning_rate': args.lr, 'wd': args.l2, 'gamma1': args.decay, 'epsilon': args.epsilon,
-#                                  'clip_weights': args.grad_clip}
 
 
 def summarize_data(df, name):

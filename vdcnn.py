@@ -25,29 +25,21 @@ import numpy as np
 from itertools import chain
 import argparse
 import logging
-import os
 import ast
-from random import randint
-
 
 logging.basicConfig(level=logging.DEBUG)
 
 parser = argparse.ArgumentParser(description="Neural Collaborative Filtering Model",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--data', nargs='?', default='./data/ag_news/',
-                        help='Input data folder')
-parser.add_argument('--output-dir', type=str, default='checkpoint',
-                    help='directory to save model params/symbol to')
-parser.add_argument('--checkpoint-freq', type=int, default=2,
-                    help='save model periodically')
-parser.add_argument('--load-prefix', type=str, default=None,
-                    help='start training from previous weights')
-parser.add_argument('--load-epoch', type=int, default=None,
-                    help='start training from previous weights')
-parser.add_argument('--gpus', type=str, default='',
-                    help='list of gpus to run, e.g. 0 or 0,2,5. empty means using cpu.')
 
-parser.add_argument('--num-epochs', type=int, default=256,
+parser.add_argument('--train-path', type=str, default='./data/ag_news/train.pickle',
+                        help='path to pickled pandas train df')
+parser.add_argument('--test-path', type=str, default='./data/ag_news/train.pickle',
+                        help='path to pickled pandas test df')
+parser.add_argument('--gpus', type=int, default=None,
+                    help='list of gpus to run, e.g. 0 or 0,2,5. negate to use cpu.')
+
+parser.add_argument('--epochs', type=int, default=256,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=128,
                     help='the number of training records in each minibatch')
@@ -55,15 +47,15 @@ parser.add_argument('--sequence-length', type=int, default=299,
                     help='the number of characters in each training example')
 
 # Optimizer
-parser.add_argument('--optimizer', type=str, default='SGD',
+parser.add_argument('--optimizer', type=str, default='sgd',
                     help='optimization algorithm to update model parameters with')
 parser.add_argument('--lr', type=float, default=0.01,
                     help='learning rate for chosen optimizer')
 parser.add_argument('--momentum', type=float, default=0.9,
                     help='momentum for optimizer')
-parser.add_argument('--lr-reduce-factor', type=float, default=0.97,
+parser.add_argument('--lr-update-factor', type=float, default=0.97,
                     help='factor to reduce lr by')
-parser.add_argument('--lr-reduce-epoch', type=int, default=3,
+parser.add_argument('--lr-update-interval', type=int, default=30000,
                     help='reduce lr every n epochs')
 parser.add_argument('--grad-clip', type=float, default=0.0,
                     help='Clips weights to +- this value')
@@ -85,7 +77,6 @@ parser.add_argument('--k', type=int, default=256)
 parser.add_argument('--l', type=int, default=256)
 parser.add_argument('--m', type=int, default=384)
 parser.add_argument('--n', type=int, default=384)
-
 
 
 class UtterancePreprocessor:
@@ -169,18 +160,18 @@ class UtterancePreprocessor:
         return self.label_to_index.get(label)
 
 
-def build_iters(train_df, test_df, feature_col, label_col, alphabet):
+def build_iters(train_df, test_df, feature_col, label_col, alphabet, hyperparameters):
     """
     :param train_df: pandas dataframe of training data
     :param test_df: pandas dataframe of test data
     :param feature_col: column in dataframe corresponding to text
     :param label_col: column in dataframe corresponding to label
+    :param hyperparameters: dict of hyperparams
     :return: mxnet data iterators
     """
     # Fit preprocessor to training data
-    preprocessor = UtterancePreprocessor(length=args.sequence_length, char_to_index=alphabet)
+    preprocessor = UtterancePreprocessor(length=hyperparameters['sequence_length'], char_to_index=alphabet)
     preprocessor.fit(train_df[feature_col].values.tolist(), train_df[label_col].values.tolist())
-
 
     # Transform data
     train_df['X'] = train_df[feature_col].apply(preprocessor.transform_utterance)
@@ -198,19 +189,14 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet):
     Y_train, Y_test = np.array(train_df['Y'].values.tolist()), np.array(test_df['Y'].values.tolist())
 
     # Build MXNet data iterators
-    train_iter = mx.io.NDArrayIter(data=X_train, label=Y_train, batch_size=args.batch_size, shuffle=True,
+    train_iter = mx.io.NDArrayIter(data=X_train, label=Y_train, batch_size=hyperparameters['batch_size'], shuffle=True,
                                    last_batch_handle='pad')
-    test_iter = mx.io.NDArrayIter(data=X_test, label=Y_test, batch_size=args.batch_size, shuffle=True,
+    test_iter = mx.io.NDArrayIter(data=X_test, label=Y_test, batch_size=hyperparameters['batch_size'], shuffle=True,
                                   last_batch_handle='pad')
     return preprocessor, train_iter, test_iter
 
 
-def compute_grid_size(p):
-    size = (((((((p * 2 + 1) * 2 + 1) * 2) + 1 + 2) * 2) + 1 + 2) * 2) + 1
-    return size
-
-
-def build_symbol(iterator, preprocessor, blocks):
+def build_symbol(iterator, preprocessor, hyperparameters):
     """
     :return:  MXNet symbol object
     """
@@ -347,36 +333,39 @@ def build_symbol(iterator, preprocessor, blocks):
     print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
     # Embed each character
-    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=args.char_embed)
-    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
-    print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
+    embed = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=hyperparameters['char_embed'])
+    embed = mx.sym.Reshape(mx.sym.transpose(embed, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
+    print("embedded output: ", embed.infer_shape(data=X_shape)[1][0])
 
     # Initial conv layers
-    stem = stem(embedded_data, 'stem')
+    stem = stem(embed, 'stem')
     print("stem output: ", stem.infer_shape(data=X_shape)[1][0])
 
     # Inception resnet blocks & reduction blocks
-    for i in list(range(blocks[0])):
+    for i in list(range(hyperparameters['blocks'][0])):
         if i == 0:
             block = inception_res_a(stem, 'inception_block_a_'+str(i))
         else:
             block = inception_res_a(block, 'inception_block_a_'+str(i))
         print("Inception A block {} module output shape: {}".format(i, block.infer_shape(data=X_shape)[1][0]))
 
-    reduction_a = reduction_a(block, 'reduction_a', args.k, args.l, args.m, args.n)
+    reduction_a = reduction_a(block, 'reduction_a', hyperparameters['k'], hyperparameters['l'],
+                              hyperparameters['m'], hyperparameters['n'])
     print("Reduction A output shape: {}".format(reduction_a.infer_shape(data=X_shape)[1][0]))
 
-    for i in list(range(blocks[1])):
+    for i in list(range(hyperparameters['blocks'][1])):
         if i == 0:
-            block = inception_res_b(reduction_a, 'inception_block_b_' + str(i), filters=args.m + args.n + 384)
+            block = inception_res_b(reduction_a, 'inception_block_b_' + str(i),
+                                    filters=hyperparameters['m'] + hyperparameters['n'] + 384)
         else:
-            block = inception_res_b(block, 'inception_block_b_' + str(i), filters=args.m + args.n + 384)
+            block = inception_res_b(block, 'inception_block_b_' + str(i),
+                                    filters=hyperparameters['m'] + hyperparameters['n'] + 384)
         print("Inception B block {} module output shape: {}".format(i, block.infer_shape(data=X_shape)[1][0]))
 
     reduction_b = reduction_b(block, 'reduction_b')
     print("Reduction B output shape: {}".format(reduction_b.infer_shape(data=X_shape)[1][0]))
 
-    for i in list(range(blocks[2])):
+    for i in list(range(hyperparameters['blocks'][2])):
         if i == 0:
             block = inception_res_c(reduction_b, 'inception_block_c_' + str(i), filters=2144)
         else:
@@ -386,101 +375,66 @@ def build_symbol(iterator, preprocessor, blocks):
     avg_pool = mx.sym.Pooling(block, kernel=(1, 8), stride=(1, 1), pad=(0, 0), pool_type='avg', name='avg_pool')
     print("average pool output: ", avg_pool.infer_shape(data=X_shape)[1][0])
 
-    dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=args.dropout, name='dropout')
+    dropout = mx.sym.Dropout(mx.sym.flatten(avg_pool), p=hyperparameters['dropout'], name='dropout')
     print("dropout output: ", dropout.infer_shape(data=X_shape)[1][0])
 
     output = mx.sym.FullyConnected(dropout, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
-    sm = mx.sym.SoftmaxOutput(output, softmax_label, args.smooth_alpha)
+    sm = mx.sym.SoftmaxOutput(output, softmax_label, hyperparameters['smooth_alpha'])
     print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
 
     return sm
 
 
-def save_model():
+def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
     """
-    callback function to periodically save model
+    This function can be called by Amazon Sagemaker.
+    Trains an mxnet module.
     """
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
+    # read pickled pandas df's from disk
+    train_df = pd.read_pickle(channel_input_dirs['train'])
+    test_df = pd.read_pickle(channel_input_dirs['test'])
 
-    return mx.callback.do_checkpoint(os.path.join(args.output_dir, "checkpoint"), args.checkpoint_freq)
-
-
-def train(symbol, train_iter, val_iter):
-    """
-    :param symbol: model symbol graph
-    :param train_iter: data iterator for training data
-    :param valid_iter: data iterator for validation data
-    :return: model to predict label from features
-    """
-    devs = mx.cpu() if args.gpus is None or args.gpus is '' else [mx.gpu(int(i)) for i in args.gpus.split(',')]
-    module = mx.mod.Module(symbol, context=devs)
-    schedule = mx.lr_scheduler.FactorScheduler(step=int((train_df.shape[0] / args.batch_size) * args.lr_reduce_epoch),
-                                               factor=args.lr_reduce_factor,
-                                               stop_factor_lr=1e-04)
-    init = mx.initializer.Mixed(patterns=['conv2d_weight', '.*'],
-                         initializers=[mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
-                                       mx.initializer.Normal(sigma=0.02)])
-    if args.load_prefix:
-        print("Starting training from previous weights")
-        module.load(prefix=args.load_prefix, epoch=int(args.load_epoch))
-    module.fit(train_data=train_iter,
-               eval_data=val_iter,
-               optimizer=args.optimizer,
-               eval_metric=mx.metric.Accuracy(),
-               optimizer_params={'learning_rate': args.lr, 'wd': args.l2,
-                                 'momentum': args.momentum, 'lr_scheduler': schedule},
-               initializer=init,
-               num_epoch=args.num_epochs,
-               epoch_end_callback=save_model())
-    return module
-
-
-def summarize_data(df, name):
-    """
-    computes statistics on text classification dataframes
-    """
-    df['n_chars'] = df['utterance'].apply(lambda x: len(x))
-    print("\n{} summary:".format(name))
-    print("\tAverage characters per utterance: {0:.2f}".format(df['n_chars'].mean()))
-    print("\tStandard deviation characters per utterance: {0:.2f}".format(df['n_chars'].std()))
-    print("\tTotal utterances in df: {}".format(df.shape[0]))
-    print("\tText Classes: {}".format(len(df['intent'].unique())))
-
-
-if __name__ == '__main__':
-
-    # os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'
-
-    # Parse args
-    args = parser.parse_args()
-    args.blocks = ast.literal_eval(args.blocks)
-
-    # Compute allowed input sequence lengths
-    allowed_seq_lens = []
-    for i in range(1,10):
-        allowed_seq_lens.append(compute_grid_size(i))
-    assert args.sequence_length in allowed_seq_lens, "input sequence length must be in {} etc".format(allowed_seq_lens)
-
-    # Setup dirs
-    os.mkdir(args.output_dir) if not os.path.exists(args.output_dir) else None
-
-    # Read training data into pandas data frames
-    train_df = pd.read_pickle(os.path.join(args.data, "train.pickle"))
-    test_df = pd.read_pickle(os.path.join(args.data, "test.pickle"))
-    summarize_data(train_df, 'Training data')
-    summarize_data(test_df, 'Test data')
-
-    # Define vocab (if unknown characters are encountered they are replaced with final value in alphabet)
+    # Define vocab for lookup table
     alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'
     char_to_index = {k: v for v, k in enumerate(list(alph))}
 
-    # Build data iterators
+    # Build data iterators to feed our network
     preprocessor, train_iter, val_iter = build_iters(train_df, test_df, feature_col='utterance', label_col='intent',
-                                                     alphabet=char_to_index)
+                                                     alphabet=char_to_index, hyperparameters=hyperparameters)
 
-    # Build network graph
-    symbol = build_symbol(train_iter, preprocessor, blocks=args.blocks)
+    # Build network graph for computation
+    symbol = build_symbol(train_iter, preprocessor, hyperparameters)
 
-    # Train the model
-    trained_module = train(symbol, train_iter, val_iter)
+    # Build trainable module
+    module = mx.mod.Module(symbol, context=mx.gpu() if num_gpus else mx.cpu())
+
+    # Modify learning rate as we train
+    schedule = mx.lr_scheduler.FactorScheduler(step=hyperparameters.get('lr_update_interval'),
+                                               factor=hyperparameters.get('lr_update_factor'))
+
+    # Initialize conv filter weights using MSRAPRelu so we can train deeper architectures
+    init = mx.initializer.Mixed(patterns=['conv2d_weight', '.*'],
+                                initializers=[mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
+                                              mx.initializer.Normal(sigma=0.02)])
+
+    # Fit the model to the training data
+    module.fit(train_data=train_iter,
+               eval_data=val_iter,
+               optimizer=hyperparameters['optimizer'],
+               eval_metric=mx.metric.Accuracy(),
+               optimizer_params={'learning_rate': hyperparameters.get('lr'),
+                                 'wd': hyperparameters.get('l2'),
+                                 'momentum': hyperparameters.get('momentum'),
+                                 'lr_scheduler': schedule},
+               initializer=init,
+               num_epoch=hyperparameters.get('epochs'))
+
+    return module  # return module so Sagemaker saves it
+
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    args.blocks = ast.literal_eval(args.blocks)
+
+    train(hyperparameters=vars(args), channel_input_dirs={'train': args.train_path, 'test': args.test_path},
+          num_gpus=args.gpus)

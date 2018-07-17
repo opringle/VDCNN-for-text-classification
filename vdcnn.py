@@ -29,7 +29,7 @@ import ast
 
 logging.basicConfig(level=logging.DEBUG)
 
-parser = argparse.ArgumentParser(description="Neural Collaborative Filtering Model",
+parser = argparse.ArgumentParser(description="Deep inception inspired cnn for text classification",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
 parser.add_argument('--train-path', type=str, default='./data/ag_news/train.pickle',
@@ -39,7 +39,7 @@ parser.add_argument('--test-path', type=str, default='./data/ag_news/train.pickl
 parser.add_argument('--gpus', type=int, default=None,
                     help='list of gpus to run, e.g. 0 or 0,2,5. negate to use cpu.')
 
-parser.add_argument('--epochs', type=int, default=256,
+parser.add_argument('--epochs', type=int, default=30,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=128,
                     help='the number of training records in each minibatch')

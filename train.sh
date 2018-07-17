@@ -6,7 +6,7 @@
 
 # AGNEWs data (91.33 to beat)
 python -u vdcnn.py --gpus=0 --data=./data/ag_news --output-dir=model_ag_news \
---num-epochs=256 --lr=0.075 --momentum=0.9 --dropout=0.2 --smooth-alpha=0.001 --lr-reduce-factor=1 --lr-reduce-epoch=3 \
+--epochs=256 --lr=0.075 --momentum=0.9 --dropout=0.2 --smooth-alpha=0.001 --lr-update-factor=1 --lr-update-step=3000 \
 --blocks=1,2,1
 
 # YAHOO data (73.43 to beat)

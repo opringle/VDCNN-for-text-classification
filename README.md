@@ -4,5 +4,22 @@ Following state of the art results using [deep cnn's for text classification](ht
 
 ## ToDo
 
-- [ ] Option to preprocess data in hyperopt script, saving numpy arrays into S3 bucket. Remove pandas dependency from training script.
 - [ ] Get Sagemaker hyperopt job running locally, on cpu with small models
+- [ ] Remove pip install in code solution
+    
+# Problems
+
+- [ ] Cannot retrieve role ARN string using sagemaker SDK locally on my machine:
+
+`botocore.errorfactory.NoSuchEntityException: An error occurred (NoSuchEntity) when calling the GetRole operation: The user with name oliver_pringle cannot be found.
+` 
+
+- [ ] Cannot stage code in S3 when trying to run locally (likely related to above):
+
+`botocore.exceptions.ClientError: An error occurred (AccessDenied) when calling the PutObject operation: Access Denied
+`
+
+- [ ] When instance training, encoding errors occur in preprocessor
+
+`UnicodeEncodeError: 'ascii' codec can't encode character '\U0001f383' in position 28: ordinal not in range(128)
+`

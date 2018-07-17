@@ -19,22 +19,24 @@
 
 # -*- coding: utf-8 -*-
 
-import pandas as pd
+#import pandas as pd
 import mxnet as mx
+import os
 import numpy as np
 from itertools import chain
 import argparse
 import logging
 import ast
+from pip._internal import main as pipmain
 
 logging.basicConfig(level=logging.DEBUG)
 
 parser = argparse.ArgumentParser(description="Deep inception inspired cnn for text classification",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-parser.add_argument('--train-path', type=str, default='./data/ag_news/train.pickle',
+parser.add_argument('--train-dir', type=str, default='./data/ag_news',
                         help='path to pickled pandas train df')
-parser.add_argument('--test-path', type=str, default='./data/ag_news/train.pickle',
+parser.add_argument('--test-dir', type=str, default='./data/ag_news',
                         help='path to pickled pandas test df')
 parser.add_argument('--gpus', type=int, default=None,
                     help='list of gpus to run, e.g. 0 or 0,2,5. negate to use cpu.')
@@ -390,9 +392,14 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
     This function can be called by Amazon Sagemaker.
     Trains an mxnet module.
     """
+    # We must pip install in code until an image with pandas is available :(
+    # Alternatively we could create our own custom image.
+    pipmain(['install', 'pandas'])
+    import pandas as pd
+
     # read pickled pandas df's from disk
-    train_df = pd.read_pickle(channel_input_dirs['train'])
-    test_df = pd.read_pickle(channel_input_dirs['test'])
+    train_df = pd.read_pickle(os.path.join(channel_input_dirs['train'], 'train.pickle'))[:5000]
+    test_df = pd.read_pickle(os.path.join(channel_input_dirs['test'], 'test.pickle'))
 
     # Define vocab for lookup table
     alph = 'abcdefghijklmnopqrstuvwxyz0123456789-,;.!?:’"/|_#$%ˆ&*˜‘+=<>()[]{} ~'
@@ -435,6 +442,7 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
 if __name__ == '__main__':
     args = parser.parse_args()
     args.blocks = ast.literal_eval(args.blocks)
+    print(vars(args))
 
-    train(hyperparameters=vars(args), channel_input_dirs={'train': args.train_path, 'test': args.test_path},
+    train(hyperparameters=vars(args), channel_input_dirs={'train': args.train_dir, 'test': args.test_dir},
           num_gpus=args.gpus)

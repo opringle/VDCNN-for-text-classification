@@ -48,9 +48,8 @@ if __name__ == '__main__':
     session = boto3.Session(profile_name='personal')
     s3 = session.resource('s3')
     sagemaker_session = sagemaker.Session(boto_session=session)
-    # role = sagemaker.get_execution_role(sagemaker_session=sagemaker_session)
-    # This retrieves the ARN string, if you are in an instance that has the role attached
-    role = 'arn:aws:iam::...'
+    local_session = sagemaker.local.local_session.LocalSession(boto_session=session)
+    role = 'arn:aws:iam::931209302809:role/data_scientist'
 
     # Initialize variables
     custom_code_upload_location = 's3://{}/customcode/mxnet'.format(args.bucket_name)
@@ -77,7 +76,7 @@ if __name__ == '__main__':
                        'char_embed': 16, 'blocks': (5, 10, 5), 'k': 256, 'l': 256, 'm': 384, 'n': 384}
 
     # Create an estimator
-    estimator = MXNet(sagemaker_session=sagemaker_session if 'local' not in args.train_instance_type else None,
+    estimator = MXNet(sagemaker_session=sagemaker_session if 'local' not in args.train_instance_type else local_session,
                       hyperparameters=hyperparameters,
                       entry_point=args.train_code,
                       role=role,

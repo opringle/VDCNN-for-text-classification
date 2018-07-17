@@ -85,7 +85,7 @@ class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, char_to_index=None, pad_char='👹', unknown_char='👺', space_char='🎃'):
+    def __init__(self, length, char_to_index=None, pad_char='!', unknown_char='!', space_char='!'):
         self.length = length
         self.pad_char = pad_char
         self.unknown_char = unknown_char

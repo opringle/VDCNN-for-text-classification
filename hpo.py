@@ -69,7 +69,7 @@ if __name__ == '__main__':
                     'lr_reduce_epoch': ContinuousParameter(1, 10)
                     }
 
-    hyperparameters = {'epochs': 30, 'batch_size': 128,
+    hyperparameters = {'epochs': 30, 'batch_size': 128, 'max_train_records': None,
                        'sequence_length': 299, 'optimizer': 'sgd', 'lr': 0.01,
                        'momentum': 0.9, 'lr_update_factor': 0.97, 'lr_update_interval': 30000,
                        'grad_clip': 0.0, 'l2': 0.0, 'dropout': 0.2, 'smooth_alpha': 0.0,

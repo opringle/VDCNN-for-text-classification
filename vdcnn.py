@@ -19,7 +19,11 @@
 
 # -*- coding: utf-8 -*-
 
-#import pandas as pd
+# We must pip install in code until an image with pandas is available :(
+# Alternatively we could create our own custom image.
+from pip._internal import main as pipmain
+pipmain(['install', 'pandas'])
+import pandas as pd
 import mxnet as mx
 import os
 import numpy as np
@@ -27,7 +31,6 @@ from itertools import chain
 import argparse
 import logging
 import ast
-from pip._internal import main as pipmain
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -47,6 +50,8 @@ parser.add_argument('--batch-size', type=int, default=128,
                     help='the number of training records in each minibatch')
 parser.add_argument('--sequence-length', type=int, default=299,
                     help='the number of characters in each training example')
+parser.add_argument('--max-train-records', type=int, default=None,
+                    help='the number of training examples')
 
 # Optimizer
 parser.add_argument('--optimizer', type=str, default='sgd',
@@ -85,7 +90,7 @@ class UtterancePreprocessor:
     """
     preprocessor that can be fit to data in order to preprocess it
     """
-    def __init__(self, length, char_to_index=None, pad_char='!', unknown_char='!', space_char='!'):
+    def __init__(self, length, char_to_index=None, pad_char='🙀', unknown_char='☠', space_char='🤮'):
         self.length = length
         self.pad_char = pad_char
         self.unknown_char = unknown_char
@@ -138,9 +143,9 @@ class UtterancePreprocessor:
 
         if self.space_char not in self.char_to_index:
             self.char_to_index[self.space_char] = len(self.char_to_index)
-        print("Space tokens represented as {}\n"
-              "Unknown tokens represented as {}\n"
-              "Padded tokens represented as {}".format(self.space_char, self.unknown_char, self.pad_char))
+        # print("Space tokens represented as {}\n"
+        #       "Unknown tokens represented as {}\n"
+        #       "Padded tokens represented as {}".format(self.space_char, self.unknown_char, self.pad_char))
 
     def transform_utterance(self, utterance):
         """
@@ -184,7 +189,7 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet, hyperparame
                                                                                         preprocessor.sliced_data,
                                                                                         preprocessor.length))
 
-    print("vocabulary used in lookup table: {}".format(preprocessor.char_to_index))
+    # print("vocabulary used in lookup table: {}".format(preprocessor.char_to_index))
 
     # Get data as numpy array
     X_train, X_test = np.array(train_df['X'].values.tolist()), np.array(test_df['X'].values.tolist())
@@ -392,13 +397,10 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
     This function can be called by Amazon Sagemaker.
     Trains an mxnet module.
     """
-    # We must pip install in code until an image with pandas is available :(
-    # Alternatively we could create our own custom image.
-    pipmain(['install', 'pandas'])
-    import pandas as pd
-
     # read pickled pandas df's from disk
-    train_df = pd.read_pickle(os.path.join(channel_input_dirs['train'], 'train.pickle'))[:5000]
+    train_df = pd.read_pickle(os.path.join(channel_input_dirs['train'], 'train.pickle'))
+    if hyperparameters['max_train_records']:
+        train_df = train_df[:hyperparameters['max_train_records']]
     test_df = pd.read_pickle(os.path.join(channel_input_dirs['test'], 'test.pickle'))
 
     # Define vocab for lookup table
@@ -442,7 +444,6 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
 if __name__ == '__main__':
     args = parser.parse_args()
     args.blocks = ast.literal_eval(args.blocks)
-    print(vars(args))
 
     train(hyperparameters=vars(args), channel_input_dirs={'train': args.train_dir, 'test': args.test_dir},
           num_gpus=args.gpus)

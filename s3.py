@@ -27,8 +27,8 @@ import os
 parser = argparse.ArgumentParser(description="MXNet + Sagemaker hyperparameter optimization job",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-parser.add_argument('bucket_name', type=str, help='bucket to store code, data and artifacts')
-parser.add_argument('--s3-path', type=str, default='data/ag_news/', help='s3 pickle location')
+parser.add_argument('--bucket_name', type=str, default='finn-dl-sandbox-atlas', help='bucket to store code, data and artifacts')
+parser.add_argument('--s3-path', type=str, default='ag_news/', help='s3 pickle location')
 parser.add_argument('--local-path', type=str, default='data/ag_news/', help='local pickle location')
 
 
@@ -37,10 +37,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Authenticate to a specific set of shared credentials
-    session = sagemaker.Session(boto_session=boto3.Session(profile_name='personal'))
+    session = boto3.Session(profile_name='finn-atlas')
 
     # Upload specified data to s3
-    session.resource('s3').Bucket(args.bucket_name).Object(args.local_path + 'train.pickle').\
+    boto3.resource('s3').Bucket(args.bucket_name).Object(args.s3_path + 'train.pickle').\
         upload_file(os.path.join(args.local_path, 'train.pickle'))
-    session.resource('s3').Bucket(args.bucket_name).Object(args.local_path + 'test.pickle').\
+
+    boto3.resource('s3').Bucket(args.bucket_name).Object(args.s3_path + 'test.pickle').\
         upload_file(os.path.join(args.local_path, 'test.pickle'))

@@ -397,6 +397,8 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
     This function can be called by Amazon Sagemaker.
     Trains an mxnet module.
     """
+    hyperparameters['blocks'] = ast.literal_eval(hyperparameters['blocks'])
+
     # read pickled pandas df's from disk
     train_df = pd.read_pickle(os.path.join(channel_input_dirs['train'], 'train.pickle'))
     if hyperparameters['max_train_records']:
@@ -415,7 +417,7 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
     symbol = build_symbol(train_iter, preprocessor, hyperparameters)
 
     # Build trainable module
-    module = mx.mod.Module(symbol, context=mx.gpu() if num_gpus else mx.cpu())
+    module = mx.mod.Module(symbol, context=mx.gpu() if hyperparameters['gpus'] else mx.cpu())
 
     # Modify learning rate as we train
     schedule = mx.lr_scheduler.FactorScheduler(step=hyperparameters.get('lr_update_interval'),

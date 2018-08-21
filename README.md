@@ -1,17 +1,15 @@
 # VDCNN-for-text-classification
  
-Following state of the art results using [deep cnn's for text classification](https://arxiv.org/pdf/1606.01781.pdf) this repo investigates drawing from the inception architecture for the same task.
+- Reproduce state of the art results from [deep cnn's for text classification](https://arxiv.org/pdf/1606.01781.pdf).
+- Investigate inception style architecture.
+- Explore using large datasets referenced in the paper as transfer learning sources for a different target task.
+- Use SageMaker distributed GPU training.
 
 ## ToDo
 
-- [ ] Remove pip install in code solution
-- [ ] Retrieve ARN with boto instead of cli input
-    
-# Problems
+- [ ] Find a transfer learning dataset.. pretrain on ag_news?
+- [ ] Improve hpo.py so it takes default hyperparameters from code
 
-- [x] When instance training, encoding errors occur in preprocessor
+## Cleanup
 
-`UnicodeEncodeError: 'ascii' codec can't encode character '\U0001f383' in position 28: ordinal not in range(128)
-`
-
-- [ ] Local training works but hyperparameter jobs cannot be run locally..
+- [ ] Remove pip install in code solution, by referencing a different sagemaker docker image

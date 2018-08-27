@@ -222,11 +222,12 @@ def build_transfer_symbol(transfer_path, transfer_epoch, iterator, preprocessor,
     fc_weights_random = arg_params_random['output_weight']
     fc_bias_random = arg_params_random['output_bias']
 
-    # Replace fully connected layer weights with new initializations
-    arg_params['fc_weight'] = fc_weights_random
-    arg_params['fc_bias'] = fc_bias_random
+    new_args = dict({k: arg_params[k] for k in arg_params if 'output_' not in k})
+    fixed_param_names = [params for params in new_args] # We will fix all layers except for the new ones
+    new_args['output_weight'] = fc_weights_random
+    new_args['output_bias'] = fc_bias_random
 
-    return sm, arg_params
+    return sm, new_args, fixed_param_names
 
 
 def best_val_score(val_iter, module, metric, scores):
@@ -273,11 +274,13 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
                                                      alphabet=char_to_index, hyperparameters=hyperparameters)
 
     # Build network graph for computation
-    symbol, params = build_transfer_symbol(hyperparameters['transfer_path'], hyperparameters['transfer_epoch'],
+    symbol, params, fixed_params = build_transfer_symbol(hyperparameters['transfer_path'], hyperparameters['transfer_epoch'],
                                            train_iter, preprocessor, hyperparameters)
 
     # Build trainable module
-    module = mx.mod.Module(symbol, context=mx.gpu() if hyperparameters['gpus'] else mx.cpu())
+    module = mx.mod.Module(symbol,
+                           fixed_param_names=fixed_params,
+                           context=mx.gpu() if hyperparameters['gpus'] else mx.cpu())
 
     # Modify learning rate as we train
     batches_per_epoch = (train_df.shape[0] // hyperparameters['batch_size']) + 1

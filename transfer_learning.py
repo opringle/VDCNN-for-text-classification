@@ -36,12 +36,16 @@ logging.basicConfig(level=logging.DEBUG)
 parser = argparse.ArgumentParser(description="Deep inception inspired cnn for text classification",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-parser.add_argument('--train-dir', type=str, default='./data/ag_news',
+parser.add_argument('--train-dir', type=str, default='./data/atb_model_41',
                         help='path to pickled pandas train df')
-parser.add_argument('--test-dir', type=str, default='./data/ag_news',
+parser.add_argument('--test-dir', type=str, default='./data/atb_model_41',
                         help='path to pickled pandas test df')
 parser.add_argument('--gpus', type=int, default=None,
                     help='list of gpus to run, e.g. 0 or 0,2,5. negate to use cpu.')
+
+# Transfer learning
+parser.add_argument('--transfer-path', type=str, default='./checkpoint/transfer_model')
+parser.add_argument('--transfer-epoch', type=int, default=1)
 
 parser.add_argument('--epochs', type=int, default=30,
                     help='how  many times to update the model parameters')
@@ -73,21 +77,6 @@ parser.add_argument('--dropout', type=float, default=0.21612639141339468,
                     help='dropout regularization probability for penultimate layer')
 parser.add_argument('--smooth-alpha', type=float, default=0.04395768050161286,
                     help='label smoothing coefficient')
-
-# Architecture
-parser.add_argument('--char-embed', type=int, default=16,
-                    help='character vector embedding size')
-parser.add_argument('--temp-conv-filters', type=int, default=64,
-                    help='character vector embedding size')
-parser.add_argument('--block1_blocks', type=int, default=1,
-                    help='number of blocks in section')
-parser.add_argument('--block2_blocks', type=int, default=1,
-                    help='number of blocks in section')
-parser.add_argument('--block3_blocks', type=int, default=1,
-                    help='number of blocks in section')
-parser.add_argument('--block4_blocks', type=int, default=1,
-                    help='number of blocks in section')
-parser.add_argument('--pool-type', type=str, default='avg', help='type of pooling before fc layers')
 
 
 class UtterancePreprocessor:
@@ -207,81 +196,37 @@ def build_iters(train_df, test_df, feature_col, label_col, alphabet, hyperparame
     return preprocessor, train_iter, test_iter
 
 
-def build_symbol_vdcnn(iterator, preprocessor, hyperparameters):
+def build_transfer_symbol(transfer_path, transfer_epoch, iterator, preprocessor, hyperparameters):
     """
-    :return:  MXNet symbol object
+    :return:  MXNet symbol object & parameters to start training from
     """
-    def conv(data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
-        conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
-                                  name='%s%s_conv2d' % (name, suffix))
-        bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
-        act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
-        return act
-
-    def conv_block(data, num_filter, name):
-        conv1 = conv(data, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv1'+str(name))
-        conv2 = conv(conv1, kernel=(1, 3), num_filter=num_filter, pad=(0, 1), name='conv2'+str(name))
-        return conv2
-
     X_shape, Y_shape = iterator.provide_data[0][1], iterator.provide_label[0][1]
 
-    data = mx.sym.Variable(name="data")
     softmax_label = mx.sym.Variable(name="softmax_label")
-    print("data_input: ", data.infer_shape(data=X_shape)[1][0])
-    print("label input: ", softmax_label.infer_shape(softmax_label=Y_shape)[1][0])
 
-    # Embed each character to 16 channels
-    embedded_data = mx.sym.Embedding(data, input_dim=len(preprocessor.char_to_index), output_dim=hyperparameters['char_embed'])
-    embedded_data = mx.sym.Reshape(mx.sym.transpose(embedded_data, axes=(0, 2, 1)), shape=(0, 0, 1, -1))
-    print("embedded output: ", embedded_data.infer_shape(data=X_shape)[1][0])
+    # Get symbol from previous model up to fully connected layer
+    # retrieve the network symbol we wish to start the weights with
+    sym, arg_params, aux_params = mx.model.load_checkpoint(transfer_path, transfer_epoch)
+    transfer_symbol = sym.get_internals()['dropout0_output']
 
-    # Temporal Convolutional Layer (without activation)
-    temp_conv_1 = mx.sym.Convolution(embedded_data, kernel=(1, 3), num_filter=hyperparameters['temp_conv_filters'], pad=(0, 1))
-    print("temp conv output: ", temp_conv_1.infer_shape(data=X_shape)[1][0])
-
-    # Create convolutional blocks with pooling in-between
-    channels = (hyperparameters['temp_conv_filters'],
-                2 * hyperparameters['temp_conv_filters'],
-                4 * hyperparameters['temp_conv_filters'],
-                8 * hyperparameters['temp_conv_filters'])
-
-    blocks = (hyperparameters['block1_blocks'],
-              hyperparameters['block2_blocks'],
-              hyperparameters['block3_blocks'],
-              hyperparameters['block4_blocks'])
-
-    for i, block_size in enumerate(blocks):
-        print("section {} ({} blocks)".format(i, block_size))
-        for j in list(range(block_size)):
-            if i == 0 and j == 0:
-                # first block follows the first temp conv layer
-                block = conv_block(temp_conv_1, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
-            elif j == 0:
-                # this block follows a pooling layer
-                block = conv_block(pool, num_filter=channels[i], name='block' + str(i) + '_' + str(j))
-            else:
-                # this block follows a previous block
-                block = conv_block(block, num_filter=channels[i], name='block'+str(i)+'_'+str(j))
-            print('\tblock'+str(i)+'_'+str(j), block.infer_shape(data=X_shape)[1][0])
-        if i != len(blocks)-1:
-            # pool after each block size, excluding final layer
-            pool = mx.sym.Pooling(block, kernel=(1, 3), stride=(1, 2), pad=(0, 1), pool_type='max')
-            print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
-
-    # pool output to one feature per kernel
-    pool_k = block.infer_shape(data=X_shape)[1][0][3]
-    print("{0} pool kernel size {1}, stride 1".format(hyperparameters['pool_type'], pool_k))
-    block = mx.sym.flatten(mx.sym.Pooling(block, kernel=(1, pool_k), stride=(1, 1), pad=(0, 0), pool_type=hyperparameters['pool_type']))
-    print("flattened pooling output: {1}".format(pool_k, block.infer_shape(data=X_shape)[1][0]))
-
-    drop = mx.sym.Dropout(block, p=hyperparameters['dropout'])
-    print("dropout output: ", block.infer_shape(data=X_shape)[1][0])
-
-    output = mx.sym.FullyConnected(drop, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
+    # Add new fully connected layer of different size
+    output = mx.sym.FullyConnected(transfer_symbol, num_hidden=len(preprocessor.label_to_index), flatten=True, name='output')
     sm = mx.sym.SoftmaxOutput(output, softmax_label, hyperparameters['smooth_alpha'])
     print("softmax output: ", sm.infer_shape(data=X_shape)[1][0])
 
-    return sm
+    # Initialize parameters for new fully connected layer
+    module = mx.mod.Module(sm)
+    module.bind(data_shapes=iterator.provide_data, label_shapes=iterator.provide_label)
+    module.init_params()
+    arg_params_random, aux_params_random = module.get_params()
+    fc_weights_random = arg_params_random['output_weight']
+    fc_bias_random = arg_params_random['output_bias']
+
+    # Replace fully connected layer weights with new initializations
+    arg_params['fc_weight'] = fc_weights_random
+    arg_params['fc_bias'] = fc_bias_random
+
+    return sm, arg_params
 
 
 def best_val_score(val_iter, module, metric, scores):
@@ -328,7 +273,8 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
                                                      alphabet=char_to_index, hyperparameters=hyperparameters)
 
     # Build network graph for computation
-    symbol = build_symbol_vdcnn(train_iter, preprocessor, hyperparameters)
+    symbol, params = build_transfer_symbol(hyperparameters['transfer_path'], hyperparameters['transfer_epoch'],
+                                           train_iter, preprocessor, hyperparameters)
 
     # Build trainable module
     module = mx.mod.Module(symbol, context=mx.gpu() if hyperparameters['gpus'] else mx.cpu())
@@ -338,24 +284,19 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
     step = hyperparameters['lr_update_epoch'] * batches_per_epoch
     schedule = mx.lr_scheduler.FactorScheduler(step=step, factor=hyperparameters['lr_update_factor'])
 
-    # Initialize conv filter weights using MSRAPRelu to help training deeper architectures
-    init = mx.initializer.Mixed(patterns=['conv2d_weight', '.*'],
-                                initializers=[mx.initializer.MSRAPrelu(factor_type='avg', slope=0.25),
-                                              mx.initializer.Normal(sigma=0.02)])
-
     # Define a metric object to pass around
     metric = mx.metric.Accuracy()
     scores = []
 
     # Fit the model to the training data
-    module.fit(train_data=train_iter,
+    module.fit(arg_params=params,  # initialize weights from transfer task
+               train_data=train_iter,
                optimizer=hyperparameters['optimizer'],
                eval_metric=metric,
                optimizer_params={'learning_rate': hyperparameters.get('lr'),
                                  'wd': hyperparameters.get('l2'),
                                  'momentum': hyperparameters.get('momentum'),
                                  'lr_scheduler': schedule},
-               initializer=init,
                num_epoch=hyperparameters.get('epochs'),
                epoch_end_callback=best_val_score(val_iter, module, metric, scores))
 
@@ -368,4 +309,4 @@ if __name__ == '__main__':
     module = train(hyperparameters=vars(args), channel_input_dirs={'train': args.train_dir, 'test': args.test_dir},
                    num_gpus=args.gpus)
 
-    module.save_checkpoint(prefix='./checkpoint/transfer_model', epoch=args.epochs)
+    module.save_checkpoint(prefix='./checkpoint/atb_model', epoch=args.epochs)

@@ -51,7 +51,7 @@ parser.add_argument('--epochs', type=int, default=30,
                     help='how  many times to update the model parameters')
 parser.add_argument('--batch-size', type=int, default=12,
                     help='the number of training records in each minibatch')
-parser.add_argument('--sequence-length', type=int, default=64,
+parser.add_argument('--sequence-length', type=int, default=256,
                     help='the number of characters in each training example')
 parser.add_argument('--max-train-records', type=int, default=None,
                     help='the number of training examples')

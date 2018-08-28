@@ -7,8 +7,9 @@
 
 ## ToDo
 
-- [ ] Find a transfer learning dataset.. pretrain on ag_news?
-- [ ] Improve hpo.py so it takes default hyperparameters from code
+- [ ] Preprocess script: select dataset, downloads from gdrive, creates pandas pickle file and uploads to an s3 bucket of choice
+- [ ] Distributed training on sagemaker with yahoo answers data
+- [ ] Transfer learning on smaller datasets
 
 ## Cleanup
 

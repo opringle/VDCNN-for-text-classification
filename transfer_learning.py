@@ -45,7 +45,7 @@ parser.add_argument('--gpus', type=int, default=None,
 
 # Transfer learning
 parser.add_argument('--transfer-path', type=str, default='./checkpoint/transfer_model')
-parser.add_argument('--transfer-epoch', type=int, default=1)
+parser.add_argument('--transfer-epoch', type=int, default=50)
 
 parser.add_argument('--epochs', type=int, default=30,
                     help='how  many times to update the model parameters')
@@ -279,7 +279,7 @@ def train(hyperparameters, channel_input_dirs, num_gpus, **kwargs):
 
     # Build trainable module
     module = mx.mod.Module(symbol,
-                           fixed_param_names=fixed_params,
+                           fixed_param_names=None,
                            context=mx.gpu() if hyperparameters['gpus'] else mx.cpu())
 
     # Modify learning rate as we train

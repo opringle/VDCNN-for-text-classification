@@ -269,7 +269,7 @@ def build_symbol_vdcnn(iterator, preprocessor, hyperparameters):
             print('\tblock' + str(i) + '_p', pool.infer_shape(data=X_shape)[1][0])
 
     # pool output to one feature per kernel
-    pool_k = block.infer_shape(data=X_shape)[1][0][3]//8
+    pool_k = block.infer_shape(data=X_shape)[1][0][3]
     print("{0} pool kernel size {1}, stride 1".format(hyperparameters['pool_type'], pool_k))
     block = mx.sym.flatten(mx.sym.Pooling(block, kernel=(1, pool_k), stride=(1, 1), pad=(0, 0), pool_type=hyperparameters['pool_type']))
     print("flattened pooling output: {1}".format(pool_k, block.infer_shape(data=X_shape)[1][0]))
